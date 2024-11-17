@@ -26,6 +26,7 @@ public class Main {
         	BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
         	// write REDIS protocol encoded string PONG to the output Stream of the clientSocket
         	out.print("+PONG\\r\\n");
+        	out.flush();
         			
         } catch (IOException e) {
           System.out.println("IOException: " + e.getMessage());
