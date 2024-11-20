@@ -1,44 +1,70 @@
 import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.InputStreamReader;
 import java.io.PrintWriter;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.io.InputStreamReader;
 
 public class Main {
   public static void main(String[] args){
     System.out.println("Logs from your program will appear here!");
-    
-        ServerSocket serverSocket = null;
-        Socket clientSocket = null;
         int port = 6379;
-        try {
-        	serverSocket = new ServerSocket(port);
-        	serverSocket.setReuseAddress(true);
-        	
-        	clientSocket = serverSocket.accept();
-        	
-        	// for writing data to the output stream of the clientSocket (sending)
-        	PrintWriter out = new PrintWriter(clientSocket.getOutputStream(),true);
-        	// for reading from the input stream of the clientSocket (receiving)
-        	BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-        	// write REDIS protocol encoded string PONG to the output Stream of the clientSocket
-        	out.print("+PONG\r\n");
-        	out.flush();
-        			
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+          serverSocket.setReuseAddress(true);
+          System.out.println("Server listening on port " + port);
+
+          while (true) { 
+            // Accept a new client
+            // blocking call waiting for new client connection but only affects the main thread
+            Socket clientSocket = serverSocket.accept();
+            ClientHandler clientHandler = new ClientHandler(clientSocket);
+            // main thread only waits for and accepts new client connections
+            // each connected client is handled independently by its own thread
+            Thread clientThread = new Thread(clientHandler);
+            clientThread.start();
+          }
         } catch (IOException e) {
           System.out.println("IOException: " + e.getMessage());
-        } finally {
-          try {
-            if (clientSocket != null) {
-              clientSocket.close();
-            }
-          } catch (IOException e) {
-            System.out.println("IOException: " + e.getMessage());
-          }
         }
+  }
+}
+// ClientHandler class to handle a single client connection
+// The Runnable interface is implemented by any class whose methods are needed to
+// be executed by a thread
+class ClientHandler implements Runnable {
+  private final Socket clientSocket;
+
+  public ClientHandler(Socket clientSocket) {
+    this.clientSocket = clientSocket;
+  }
+  @Override
+  public void run() {
+    try (
+      // for writing data to the output stream of the clientSocket (sending)
+      PrintWriter out = new PrintWriter(clientSocket.getOutputStream(),true);
+      // for reading from the input stream of the clientSocket (receiving)
+      BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));     
+    ) {
+      String input;
+      while ((input = in.readLine()) != null) {
+        System.out.println("Received: " + input);
+        if (input.contains("PING")) {
+          // write REDIS protocol encoded string PONG to the output Stream of the clientSocket
+          out.print("+PONG\r\n");
+          out.flush();
+        } 
+      }
+    } catch (IOException e) {
+      System.out.println("IOException: " + e.getMessage());
+    } finally {
+      try {
+        if (clientSocket != null) {
+          clientSocket.close();
+        }
+      } catch (IOException e) {
+        System.out.println("IOException: " + e.getMessage());
+      }
+    }
   }
 }
 
