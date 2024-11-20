@@ -17,11 +17,12 @@ for each new client that connects
 
 public class EventLoopServer {
     private static final int port = 6379;
+    @SuppressWarnings("CallToPrintStackTrace")
     public static void main(String[] args) throws ClosedChannelException {
         try {
             // create a selector for monitoring channels
             Selector selector = Selector.open();
-            // create a non-blocking serversocketChannel
+            // create a non-blocking server socket Channel
             ServerSocketChannel serverChannel = ServerSocketChannel.open();
             serverChannel.configureBlocking(false);
 
@@ -76,7 +77,6 @@ public class EventLoopServer {
                             ByteBuffer responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
                             clientChannel.write(responseBuffer);
                         }
-                     
                     }
                 }
             } 

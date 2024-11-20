@@ -78,7 +78,7 @@ immediately after the program terminates. Without this - because of wait time st
 the server might respond with a "Address already in use" warning if restarted too quickly
 
 The server remains in a blocked state at serverSocket.accept()
-until a client conects. Once a client connects a Socket object is created
+until a client connects. Once a client connects a Socket object is created
 (clientSocket). The server could then use this socket to communicate with the client
 (send or receive data)
 */
