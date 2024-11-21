@@ -9,6 +9,7 @@ import java.nio.channels.SocketChannel;
 import java.util.Iterator;
 import java.util.Set;
 
+
 /* 
 nio = non-blocking io
 implementation of a server that uses a Event Loop instead of a new thread
@@ -16,72 +17,89 @@ for each new client that connects
 */
 
 public class EventLoopServer {
-    private static final int port = 6379;
-    @SuppressWarnings("CallToPrintStackTrace")
-    public static void main(String[] args) throws ClosedChannelException {
-        try {
-            // create a selector for monitoring channels
-            Selector selector = Selector.open();
-            // create a non-blocking server socket Channel
-            ServerSocketChannel serverChannel = ServerSocketChannel.open();
-            serverChannel.configureBlocking(false);
-
-            // Bind the server channel to the specified port
-            serverChannel.bind(new InetSocketAddress(port));
-            // register channel with the selector to listen for OP_ACCEPT events
-            serverChannel.register(selector, SelectionKey.OP_ACCEPT);
-            ByteBuffer buffer = ByteBuffer.allocate(256);
-            System.out.println("Server is running on port " + port);
-
-            // Event loop
-            while (true) { 
-                // Select ready channels using the selector
-                selector.select();
-                // Get the set of selected keys
-                Set<SelectionKey> selectedKeys = selector.selectedKeys();
-                Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
-
-                while (keyIterator.hasNext()) {
-                    SelectionKey key = keyIterator.next();
-                    if (key.isAcceptable()) {
-
-                        // Accept a new connection from a client
-                        ServerSocketChannel server = (ServerSocketChannel) key.channel();
-                        SocketChannel clientChannel = server.accept();
-                        clientChannel.configureBlocking(false);
-                        // Register for read events
-                        clientChannel.register(selector, SelectionKey.OP_READ);
-                        System.out.println("New client connected: " + clientChannel.getRemoteAddress());
-                    }
-                    if (key.isReadable()) {
-                        SocketChannel clientChannel = (SocketChannel) key.channel();
-                        // Read data from the client
-                        buffer.clear();
-                        int bytesRead = clientChannel.read(buffer);
-                        if (bytesRead == -1) {
-                            // Client disconnected
-                            key.cancel();
-                            clientChannel.close();
-                            System.out.println("Client disconnected: " + clientChannel.getRemoteAddress());
-                            continue;
-                        }
-                    
-
-                        buffer.flip();
-                        String message = new String(buffer.array(), 0, bytesRead);
-                        // Process received message
-                        System.out.println("Received: " + message);
-
-                        // Respond to PING messages
-                        if (message.equalsIgnoreCase("PING")) {
-                            ByteBuffer responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
-                            clientChannel.write(responseBuffer);
-                        }
-                    }
-                }
-            } 
-            } catch (IOException e) {
-                e.printStackTrace();
-            }   
-    }
+	private static final int port = 6379;
+	public static void main(String[] args) throws ClosedChannelException {
+		try {
+			// create Selector for monitoring channels
+			Selector selector = Selector.open();
+			// create a non-blocking server socket channel
+			ServerSocketChannel serverChannel = ServerSocketChannel.open();
+			serverChannel.configureBlocking(false);
+			// bind the server channel to the specified port and register
+			// the channel with the selector
+			serverChannel.bind(new InetSocketAddress(port));
+			serverChannel.register(selector,SelectionKey.OP_ACCEPT);
+			ByteBuffer buffer = ByteBuffer.allocate(256);
+			System.out.println("Server is running on port " + port);
+			
+			// Event loop
+			while (true) {
+				// Select ready channels using the selector
+				selector.select();
+				// Get the set of selected keys corresponding to ready channels
+				Set<SelectionKey> selectedKeys = selector.selectedKeys();
+				// create an iterator object to iterate through the selectedKeys
+				Iterator<SelectionKey> keyIterator = selectedKeys.iterator();
+				
+				while (keyIterator.hasNext()) {
+					SelectionKey currKey = keyIterator.next();
+					if (currKey.isAcceptable()) {
+						// if the current selection key corresponds to a channel that is registered
+						// with the OP_ACCEPT event then we create a new client connection
+						ServerSocketChannel server = (ServerSocketChannel) currKey.channel();
+						// because the channel is nonBlocking, we do not hold up the main thread waiting for a new connection
+						SocketChannel clientChannel = server.accept();
+						if (clientChannel != null) {
+							// if
+							clientChannel.configureBlocking(false);
+							// Register for read events
+							clientChannel.register(selector,  SelectionKey.OP_READ);
+							System.out.println("New client connected: " + clientChannel.getRemoteAddress());
+						} else {
+							continue;
+						}
+					}
+					if (currKey.isReadable()) {
+						// check if event on the channel is a READ event
+						SocketChannel clientChannel = (SocketChannel) currKey.channel();
+						// Read data from the client
+						buffer.clear();
+						// clears the byte buffer to prepare it for a new read operation
+						int bytesRead = clientChannel.read(buffer);
+						// .read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
+						if (bytesRead == -1) {
+							System.out.println("Client disconnected: " + clientChannel.getRemoteAddress());
+							currKey.cancel(); // cancel the key and remove it from the Selector
+							clientChannel.close();
+							continue; // continue to the next key
+						}
+						buffer.flip(); 
+						// prepares the ByteBuffer for reading the data it has received - set buffer limit to the current position
+						// and resets the position to 0 so we can start reading at the beginning of the buffer
+						String message = new String(buffer.array(), 0, bytesRead);
+						// buffer.array is the byte array backing the buffer, 0 and bytesRead are the starting and ending points of the read
+						System.out.println("Message Received " + message);
+						if (message.contains("PING")) {
+							ByteBuffer responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
+							clientChannel.write(responseBuffer);
+						
+						} else if (message.contains("ECHO")) {
+							// check if our message contains 
+							String[] parts = message.split("\r\n");
+							if (parts.length >= 4 && parts[2].equalsIgnoreCase("ECHO")) {
+								System.out.println("Echo Argument: " + parts[4]);
+								// parts[3] = $[length of echo argument]
+								ByteBuffer responseBuffer = ByteBuffer.wrap((parts[3] + "\r\n" + parts[4] + "\r\n").getBytes());
+								clientChannel.write(responseBuffer);
+							}
+						}
+					}
+				}
+			}
+			
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+		
+	}
 }
