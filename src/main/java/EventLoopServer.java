@@ -6,18 +6,18 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.time.LocalDateTime;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Set;
-
-
-/* 
-nio = non-blocking io
-implementation of a server that uses a Event Loop instead of a new thread
-for each new client that connects
-*/
+import java.util.concurrent.ConcurrentHashMap;
 
 public class EventLoopServer {
 	private static final int port = 6379;
+	
+	public static Map<String, String> data = new ConcurrentHashMap<>();
+	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
+	
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			// create Selector for monitoring channels
@@ -50,7 +50,8 @@ public class EventLoopServer {
 						// because the channel is nonBlocking, we do not hold up the main thread waiting for a new connection
 						SocketChannel clientChannel = server.accept();
 						if (clientChannel != null) {
-							// if
+							// if there is no client awaiting connection then we immediately return null
+							// if not clientChannel is a reference to the connection with the client
 							clientChannel.configureBlocking(false);
 							// Register for read events
 							clientChannel.register(selector,  SelectionKey.OP_READ);
@@ -65,8 +66,7 @@ public class EventLoopServer {
 						// Read data from the client
 						buffer.clear();
 						// clears the byte buffer to prepare it for a new read operation
-						int bytesRead = clientChannel.read(buffer);
-						// .read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
+						int bytesRead = clientChannel.read(buffer); // .read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
 						if (bytesRead == -1) {
 							System.out.println("Client disconnected: " + clientChannel.getRemoteAddress());
 							currKey.cancel(); // cancel the key and remove it from the Selector
@@ -77,20 +77,58 @@ public class EventLoopServer {
 						// prepares the ByteBuffer for reading the data it has received - set buffer limit to the current position
 						// and resets the position to 0 so we can start reading at the beginning of the buffer
 						String message = new String(buffer.array(), 0, bytesRead);
-						// buffer.array is the byte array backing the buffer, 0 and bytesRead are the starting and ending points of the read
+						// buffer.array is the byte array backing the buffer 0 and bytesRead are the starting and ending points of the read
 						System.out.println("Message Received " + message);
-						if (message.contains("PING")) {
-							ByteBuffer responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
-							clientChannel.write(responseBuffer);
-						
-						} else if (message.contains("ECHO")) {
-							// check if our message contains 
-							String[] parts = message.split("\r\n");
-							if (parts.length >= 4 && parts[2].equalsIgnoreCase("ECHO")) {
-								System.out.println("Echo Argument: " + parts[4]);
-								// parts[3] = $[length of echo argument]
-								ByteBuffer responseBuffer = ByteBuffer.wrap((parts[3] + "\r\n" + parts[4] + "\r\n").getBytes());
-								clientChannel.write(responseBuffer);
+						String[] parts = message.split("\r\n");
+						if (parts.length >= 2) {
+							String command = parts[2].toUpperCase();
+							ByteBuffer responseBuffer = null;
+							switch(command) {
+								case "PING":
+									responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
+									clientChannel.write(responseBuffer);
+									break;
+								case "ECHO":
+									System.out.println("Echo Argument: " + parts[4]);
+									// parts[3] = $[length of echo argument]
+									responseBuffer = ByteBuffer.wrap((parts[3] + "\r\n" + parts[4] + "\r\n").getBytes());
+									clientChannel.write(responseBuffer);
+									break;
+								case "SET":
+									// Set command without PX
+									System.out.println("Set Command key: " + parts[4] + "\r\n Set Command value:" + parts[6]);
+									if (parts.length == 7) {
+										data.put(parts[4], parts[6]);
+										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
+										expiryTimes.remove(parts[4]); // remove any existing expiration for this key
+										clientChannel.write(responseBuffer);
+										
+									} else if (parts.length == 9 && parts[7].equalsIgnoreCase("PX")) {
+										data.put(parts[4],  parts[6]);
+										long expiryMillis = 1_000_000 * Long.parseLong(parts[8]);
+										LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
+										expiryTimes.put(parts[4], expiryTime); // store the expiration time
+									}
+									break;
+								case "GET":
+									LocalDateTime expirationTime = expiryTimes.get(parts[4]);
+									if (expirationTime != null) {
+										if (LocalDateTime.now().isAfter(expirationTime)) {
+											// the case where the access occurs after the expiration time
+											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
+										}
+									}
+									String key = data.get(parts[4]);
+									if (key == null) {
+										responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
+									} else {
+										responseBuffer = ByteBuffer.wrap(("$" + key.length() + "\r\n" + key + "\r\n").getBytes());
+									}
+									clientChannel.write(responseBuffer);
+									break;
+								default:
+									break;
+									
 							}
 						}
 					}
