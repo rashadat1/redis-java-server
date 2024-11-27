@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+// Build Redis
 public class EventLoopServer {
 	private static final int port = 6379;
 	
@@ -20,7 +21,7 @@ public class EventLoopServer {
 	
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
-			// create Selector for monitoring channels
+			// create Selector for monitoring channels   
 			Selector selector = Selector.open();
 			// create a non-blocking server socket channel
 			ServerSocketChannel serverChannel = ServerSocketChannel.open();
@@ -34,7 +35,7 @@ public class EventLoopServer {
 			
 			// Event loop
 			while (true) {
-				// Select ready channels using the selector
+				// Select ready channels using the selector 
 				selector.select();
 				// Get the set of selected keys corresponding to ready channels
 				Set<SelectionKey> selectedKeys = selector.selectedKeys();
@@ -96,19 +97,20 @@ public class EventLoopServer {
 									break;
 								case "SET":
 									// Set command without PX
-									System.out.println("Set Command key: " + parts[4] + "\r\n Set Command value:" + parts[6]);
+									System.out.println("Set Command key: " + parts[4] + "\r\nSet Command value: " + parts[6]);
 									if (parts.length == 7) {
 										data.put(parts[4], parts[6]);
 										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 										expiryTimes.remove(parts[4]); // remove any existing expiration for this key
-										clientChannel.write(responseBuffer);
 										
-									} else if (parts.length == 9 && parts[7].equalsIgnoreCase("PX")) {
+									} else if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
 										data.put(parts[4],  parts[6]);
-										long expiryMillis = 1_000_000 * Long.parseLong(parts[8]);
+										long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
 										LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
 										expiryTimes.put(parts[4], expiryTime); // store the expiration time
+										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 									}
+									clientChannel.write(responseBuffer);
 									break;
 								case "GET":
 									LocalDateTime expirationTime = expiryTimes.get(parts[4]);
@@ -116,6 +118,8 @@ public class EventLoopServer {
 										if (LocalDateTime.now().isAfter(expirationTime)) {
 											// the case where the access occurs after the expiration time
 											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
+											clientChannel.write(responseBuffer);
+											break;
 										}
 									}
 									String key = data.get(parts[4]);
