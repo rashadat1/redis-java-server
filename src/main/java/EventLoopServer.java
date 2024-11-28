@@ -18,6 +18,9 @@ public class EventLoopServer {
 	
 	public static Map<String, String> data = new ConcurrentHashMap<>();
 	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
+	private static String dir = null;
+	private static String dbfilename = null;
+	
 	
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
@@ -32,7 +35,10 @@ public class EventLoopServer {
 			serverChannel.register(selector,SelectionKey.OP_ACCEPT);
 			ByteBuffer buffer = ByteBuffer.allocate(256);
 			System.out.println("Server is running on port " + port);
-			
+			if (args.length > 0) {
+				dir = args[1];
+				dbfilename = args[3];
+			}
 			// Event loop
 			while (true) {
 				// Select ready channels using the selector 
@@ -104,6 +110,7 @@ public class EventLoopServer {
 										expiryTimes.remove(parts[4]); // remove any existing expiration for this key
 										
 									} else if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
+										// Set command with PX to set expiration
 										data.put(parts[4],  parts[6]);
 										long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
 										LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
@@ -129,6 +136,27 @@ public class EventLoopServer {
 										responseBuffer = ByteBuffer.wrap(("$" + key.length() + "\r\n" + key + "\r\n").getBytes());
 									}
 									clientChannel.write(responseBuffer);
+									break;
+								case "CONFIG":
+									String commandStr = null;
+									String paramValue = null;
+									String prefix = "*2\r\n";
+									String parameterName = parts[6];
+									
+									if (parts[4].equals("GET")) {
+										// use .equals() for string comparison "==" is for reference comparison
+										System.out.println("Received CONFIG GET Command");
+										if (parameterName.equals("dir")) {
+											commandStr = "$3\r\ndir\r\n";
+											paramValue = dir != null ? dir : "";
+											
+										} else if (parameterName.equals("dbfilename")) {
+											commandStr = "$10\r\ndbfilename\r\n";
+											paramValue = dbfilename != null ? dbfilename: "";
+										}
+									responseBuffer = ByteBuffer.wrap((prefix + commandStr + "$" + paramValue.length() + "\r\n" + paramValue + "\r\n").getBytes());
+									clientChannel.write(responseBuffer);
+									}
 									break;
 								default:
 									break;
