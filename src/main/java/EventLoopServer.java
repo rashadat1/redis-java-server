@@ -2,6 +2,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.FileChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
@@ -21,7 +22,87 @@ public class EventLoopServer {
 	private static String dir = null;
 	private static String dbfilename = null;
 	
-	
+	private static void loadRdbFile() throws IOException {
+		if (dir == null || dbfilename == null) {
+			System.out.println("No RDB File specified. Skipping loading of RDB file.");
+			return;
+		}
+		String filepath = dir + "/" + dbfilename;
+		java.io.File rdbfile = new java.io.File(filepath);
+		if (!rdbfile.exists()) {
+			System.out.println("No RDB File exists at this path: " + filepath);
+			return;
+		}
+		try (java.io.FileInputStream fileInputStream = new java.io.FileInputStream(rdbfile)) {
+			// fileinputstream opens a connection to  the file and obtains input bytes the file, used for reading streams of raw bytes
+			ByteBuffer fileBuffer = ByteBuffer.allocate((int) rdbfile.length());
+			// allocate a channel to read the file
+			FileChannel fileChannel = fileInputStream.getChannel();
+			// read a sequence of bytes from this channel into the given buffer
+			fileChannel.read(fileBuffer);
+			// flips buffer limit set to the current position and then the position is set to zero - after a sequence of channel-read
+			// use this method to prepare for a sequence of channel-write operatons
+			fileBuffer.flip();
+			// parse RDB file
+			parseRDB(fileBuffer);
+			
+		}
+		
+	}
+	private static void parseRDB(ByteBuffer fileBuffer) {
+		// Parse header by creating an empty byte array to store the first 9 bytes of the file (which is the header)
+		byte[] header = new byte[9];
+		// copy data into the header array
+		fileBuffer.get(header);
+		String headStr = new String(header); // now header holds the first 9 bytes of the file - the header
+		if (!headStr.equals("REDIS0011")) {
+			throw new IllegalArgumentException("Invalid RDB header: " + headStr);
+		}
+		System.out.println("RDB header validated.");
+		
+		// iterate through sections of the file
+		while (fileBuffer.hasRemaining()) {
+			// check if there are any bytes between the current position and the limit in the buffer
+			byte sectionType = fileBuffer.get();
+			if (sectionType == (byte) 0xFA) {
+				// 0x denotes hexadecimal notation and FA represents a single byte in hexadecimal
+				// 0xFA indicates the start of a metadata subsection
+				skipString(fileBuffer); // skip metadata key (name of the attribute)
+				skipString(fileBuffer); // skip metadata value (value of the attribute)
+			} else if (sectionType == (byte) 0xFE) {
+				// parse database section
+				parseDatabase(fileBuffer);
+			} else if (sectionType == (byte) 0xFF) {
+				// end of file section
+				System.out.println("RDB parsing completed.");
+				break;
+			} else  {
+				throw new IllegalArgumentException("Uknown RDB section type: " + sectionType);
+			}
+		}
+	}
+	private static void parseDatabase(ByteBuffer fileBuffer) {
+		int dbIndex = readSizeEncoded(fileBuffer);
+		System.out.println("Database index: " + dbIndex);
+	}
+	private static int readSizeEncoded(ByteBuffer fileBuffer) {
+		// for efficiency we store the index using variable-length encoding
+		// small numbers - 1 byte, larger numbers - 2 bytes, very large numbers - full 8 byte integer
+		
+		// read first byte
+		byte firstByte = fileBuffer.get();
+		int size = firstByte & 0x3F;
+		// isolates the first two bits of the byte
+		int prefix = firstByte & 0xC0;
+		if (prefix == 0x80) {
+			// 0x80 = 10_000_000 (hexadecimal = binary)
+			// this prefix means a large value - if the prefix = 10
+			return fileBuffer.getInt();
+		}
+		
+		
+	}
+
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			// create Selector for monitoring channels   
