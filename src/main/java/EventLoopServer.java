@@ -57,19 +57,27 @@ public class EventLoopServer {
 		}
 		System.out.println("RDB Header Validated.");
 		while (fileBuffer.hasRemaining()) {
-			// while there are bytes remaining in the buffer
+			// while there are remaining bytes in the buffer
 			byte sectionType = fileBuffer.get();
 			if (sectionType == (byte) 0xFE) {
 				continue;
 			} else if (sectionType == (byte) 0x00) {
+				
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				data.put(key, value);
+				
+			} else if (sectionType == (byte) 0xFB) {
+				
+				int keyHashTableSize = readSize(fileBuffer);
+				int expiryHashTableSize = readSize(fileBuffer);
+				
 			} else if (sectionType == (byte) 0xFF) {
 				break;
 			}
 		}
 	}
+	
 	
 	private static String readString(ByteBuffer fileBuffer) {
 		int size = readSize(fileBuffer);
@@ -78,27 +86,39 @@ public class EventLoopServer {
 		return new String(StringBytes);
 	}
 	
-	private static int readSize(ByteBuffer fileBuffer) {
-	    // Read the first byte
-	    byte firstByte = fileBuffer.get();
-	    // Extract the first two bits of the byte (0b11000000)
-	    int prefix = firstByte & 0xC0;
-
-	    if (prefix == 0x00) {
-	        // 0b00 - Size is in the remaining 6 bits of the first byte (0b00111111)
-	        return firstByte & 0x3F; // Extract 6 bits from the first byte
-	    } else if (prefix == 0x40) {
-	        // 0b01 - Size is in the next 14 bits (6 bits from first + 8 bits from next byte)
-	        byte secondByte = fileBuffer.get();
-	        return ((firstByte & 0x3F) << 8) | (secondByte & 0xFF); // Merge 6 bits + 8 bits
-	    } else if (prefix == 0x80) {
-	        // 0b10 - Size is stored as a 32-bit big-endian integer (next 4 bytes)
-	        return fileBuffer.getInt();
+	private static int readSize(ByteBuffer buffer) {
+	    byte firstByte = buffer.get();
+	    int firstTwoBits = (firstByte & 0xC0) >> 6;
+	    if (firstTwoBits == 0) {
+	        // 0b00 - 6-bit size
+	        return firstByte & 0x3F;
+	    } else if (firstTwoBits == 1) {
+	        // 0b01 - 14-bit size (6 bits from first byte + 8 bits from second byte)
+	        int secondByte = buffer.get() & 0xFF;
+	        return ((firstByte & 0x3F) << 8) | secondByte;
+	    } else if (firstTwoBits == 2) {
+	        // 0b10 - 32-bit size (next 4 bytes as a full integer)
+	        return buffer.getInt();
+	    } else if (firstTwoBits == 3) {
+	        // 0b11 - Special encoding
+	        int encodingType = firstByte & 0x3F; // The remaining 6 bits tell us the type
+	        switch (encodingType) {
+	            case 0x00: // 0xC0 - 8-bit integer encoding
+	                return buffer.get();
+	            case 0x01: // 0xC1 - 16-bit integer encoding (little-endian)
+	                return buffer.getShort() & 0xFFFF; // convert short to unsigned int
+	            case 0x02: // 0xC2 - 32-bit integer encoding (little-endian)
+	                return buffer.getInt();
+	            case 0x03: // 0xC3 - LZF-compressed string (NOT IMPLEMENTED)
+	                throw new IllegalArgumentException("LZF compression not supported yet");
+	            default:
+	                throw new IllegalArgumentException("Unsupported special encoding type: " + encodingType);
+	        }
 	    } else {
-	        // 0b11 - Special encoding (not relevant for sizes, but could be LZF compressed strings)
-	        throw new IllegalArgumentException("Unsupported size encoding with prefix 0xC0");
+	        throw new IllegalArgumentException("Unsupported size encoding");
 	    }
 	}
+
 
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
@@ -237,6 +257,16 @@ public class EventLoopServer {
 									clientChannel.write(responseBuffer);
 									}
 									break;
+								case "KEYS":
+									if (message.trim().equals("KEYS *")) {
+										StringBuilder response = new StringBuilder("*").append(data.size()).append("\r\n");
+										data.keySet().forEach(val -> {
+											response.append("$").append(val.length()).append("\r\n").append(val).append("\r\n");
+										});
+										clientChannel.write(ByteBuffer.wrap(response.toString().getBytes()));
+									}
+									break;
+									
 								default:
 									break;
 									
