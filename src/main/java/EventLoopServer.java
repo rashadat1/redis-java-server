@@ -47,37 +47,29 @@ public class EventLoopServer {
 	}
 
 	private static void parseRDB(ByteBuffer fileBuffer) {
-		byte[] header = new byte[9];
-		// read the first 9 bytes in the file to the header byte array
-		fileBuffer.get(header);
-		// create a String from the header array
-		String headStr = new String(header);
-		if (!headStr.equals("REDIS0011")) {
-			throw new IllegalArgumentException("Invalid RDB Header: " + headStr);
-		}
-		System.out.println("RDB Header Validated.");
-		while (fileBuffer.hasRemaining()) {
-			// while there are remaining bytes in the buffer
-			byte sectionType = fileBuffer.get();
-			if (sectionType == (byte) 0xFE) {
-				continue;
-			} else if (sectionType == (byte) 0x00) {
-				
-				String key = readString(fileBuffer);
-				String value = readString(fileBuffer);
-				data.put(key, value);
-				
-			} else if (sectionType == (byte) 0xFB) {
-				
-				int keyHashTableSize = readSize(fileBuffer);
-				int expiryHashTableSize = readSize(fileBuffer);
-				
-			} else if (sectionType == (byte) 0xFF) {
-				break;
-			}
-		}
+	    byte[] header = new byte[9];
+	    fileBuffer.get(header);
+	    String headStr = new String(header);
+	    if (!headStr.equals("REDIS0011")) {
+	        throw new IllegalArgumentException("Invalid RDB Header: " + headStr);
+	    }
+	    System.out.println("RDB Header Validated.");
+	    
+	    while (fileBuffer.hasRemaining()) {
+	        byte sectionType = fileBuffer.get();
+	        if (sectionType == (byte) 0xFE) {
+	            continue;
+	        } else if (sectionType == (byte) 0x00) {
+	            String key = readString(fileBuffer);
+	            String value = readString(fileBuffer);
+	            if (!key.isEmpty()) {
+		            data.put(key, value);
+	            }
+	        } else if (sectionType == (byte) 0xFF) {
+	            break;
+	        }
+	    }
 	}
-	
 	
 	private static String readString(ByteBuffer fileBuffer) {
 		int size = readSize(fileBuffer);
@@ -109,13 +101,14 @@ public class EventLoopServer {
 	                return buffer.getShort() & 0xFFFF; // convert short to unsigned int
 	            case 0x02: // 0xC2 - 32-bit integer encoding (little-endian)
 	                return buffer.getInt();
-	            case 0x03: // 0xC3 - LZF-compressed string (NOT IMPLEMENTED)
-	                throw new IllegalArgumentException("LZF compression not supported yet");
 	            default:
-	                throw new IllegalArgumentException("Unsupported special encoding type: " + encodingType);
+	            	System.out.println("Unknown encoding tpye: " + encodingType);
+	            	buffer.position(buffer.position() + 1);
+	            	return 0;
 	        }
 	    } else {
-	        throw new IllegalArgumentException("Unsupported size encoding");
+	        System.out.println("Unsupported size encoding");
+	        return 0;
 	    }
 	}
 
@@ -165,8 +158,7 @@ public class EventLoopServer {
 						} else {
 							continue;
 						}
-					}
-					if (currKey.isReadable()) {
+					} else if (currKey.isReadable()) {
 						// check if event on the channel is a READ event
 						SocketChannel clientChannel = (SocketChannel) currKey.channel();
 						// Read data from the client
@@ -186,6 +178,7 @@ public class EventLoopServer {
 						// buffer.array is the byte array backing the buffer 0 and bytesRead are the starting and ending points of the read
 						System.out.println("Message Received " + message);
 						String[] parts = message.split("\r\n");
+						
 						if (parts.length >= 2) {
 							String command = parts[2].toUpperCase();
 							ByteBuffer responseBuffer = null;
@@ -204,13 +197,17 @@ public class EventLoopServer {
 									// Set command without PX
 									System.out.println("Set Command key: " + parts[4] + "\r\nSet Command value: " + parts[6]);
 									if (parts.length == 7) {
-										data.put(parts[4], parts[6]);
+										if (!parts[4].isEmpty()) {
+											data.put(parts[4], parts[6]);
+										}
 										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 										expiryTimes.remove(parts[4]); // remove any existing expiration for this key
 										
 									} else if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
 										// Set command with PX to set expiration
-										data.put(parts[4],  parts[6]);
+										if (!parts[4].isEmpty()) {
+											data.put(parts[4],  parts[6]);
+										}
 										long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
 										LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
 										expiryTimes.put(parts[4], expiryTime); // store the expiration time
@@ -258,10 +255,14 @@ public class EventLoopServer {
 									}
 									break;
 								case "KEYS":
-									if (message.trim().equals("KEYS *")) {
+									System.out.println("Received KEYS command");
+									if (parts[4].equals("*")) {
+										System.out.println("Received KEYS * command");
 										StringBuilder response = new StringBuilder("*").append(data.size()).append("\r\n");
-										data.keySet().forEach(val -> {
-											response.append("$").append(val.length()).append("\r\n").append(val).append("\r\n");
+										data.keySet().forEach(v -> {
+											if (!v.isEmpty()) {
+												response.append("$").append(v.length()).append("\r\n").append(v).append("\r\n");
+											}
 										});
 										clientChannel.write(ByteBuffer.wrap(response.toString().getBytes()));
 									}
@@ -270,7 +271,7 @@ public class EventLoopServer {
 								default:
 									break;
 									
-							}
+								}
 						}
 					}
 				}
