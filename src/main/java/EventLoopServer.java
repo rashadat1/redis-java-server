@@ -23,9 +23,9 @@ public class EventLoopServer {
 	private static String dir = null;
 	private static String dbfilename = null;
 	
-	public static void loadRDBFile() throws FileNotFoundException, IOException {
-		if (dir == null || dbfilename == null) {
-			System.out.println("No RDB File specified.");
+	private static void loadRDBFile() throws IOException {
+		if (dir == null | dbfilename == null) {
+			System.out.println("No RDB file specified.");
 			return;
 		}
 		String pathname = dir + '/' + dbfilename;
@@ -34,48 +34,98 @@ public class EventLoopServer {
 			System.out.println("RDB File does not exist at the specified filepath: " + pathname);
 			return;
 		}
+		// A FileInputStream obtains input bytes from a file in a file system
 		try (java.io.FileInputStream fileInputStream = new java.io.FileInputStream(rdbFile)) {
-			// create a buffer to read from the file input stream - set capacity of this buffer to the length of rdbFile
-			ByteBuffer fileBuffer = ByteBuffer.allocate((int) rdbFile.length());
-			// returns the unique FileChannel object associated with this file input stream.
+			// return the unique file channel for the given input stream
 			FileChannel fileChannel = fileInputStream.getChannel();
-			// read a squence of bytes from the channel associated with the file's input stream into the fileBuffer
+			ByteBuffer fileBuffer = ByteBuffer.allocate((int) rdbFile.length());
+			// after creating the file channel we read the bytes from the fileInputStream to the fileBuffer using the fileChannel
 			fileChannel.read(fileBuffer);
+			// flip the fileBuffer so that our cursor is at the beginning of the buffer
 			fileBuffer.flip();
 			parseRDB(fileBuffer);
+			
 		}
 	}
-
+	
 	private static void parseRDB(ByteBuffer fileBuffer) {
-	    byte[] header = new byte[9];
-	    fileBuffer.get(header);
-	    String headStr = new String(header);
-	    if (!headStr.equals("REDIS0011")) {
-	        throw new IllegalArgumentException("Invalid RDB Header: " + headStr);
-	    }
-	    System.out.println("RDB Header Validated.");
-	    
-	    while (fileBuffer.hasRemaining()) {
-	        byte sectionType = fileBuffer.get();
-	        if (sectionType == (byte) 0xFE) {
-	            continue;
-	        } else if (sectionType == (byte) 0x00) {
-	            String key = readString(fileBuffer);
-	            String value = readString(fileBuffer);
-	            if (!key.isEmpty()) {
-		            data.put(key, value);
-	            }
-	        } else if (sectionType == (byte) 0xFF) {
-	            break;
-	        }
-	    }
+		// in hexadecimal the header section of RDB file looks like: 52 45 44 49 53 30 30 31 31
+		// each hexadecimal digit is 4 bits so this is 9 bytes
+		byte[] header = new byte[9];
+		// reads the bytes at the current position into the header byte array and increments position
+		fileBuffer.get(header);
+		String headerStr = new String(header);
+		if (!headerStr.equals("REDIS0011")) {
+			System.out.println("Incorrect RDB File Header.");
+			return;
+		}
+		System.out.println("RDB Header Validated: " + headerStr);
+		while (fileBuffer.hasRemaining()) {
+			byte sectionType = fileBuffer.get();
+			if (sectionType == (byte) 0xFE) {
+				continue;
+			} else if (sectionType == (byte) 0x00) {
+				// 00 corresponds to a string encoded key, value pair 
+				String key = readString(fileBuffer);
+				String value = readString(fileBuffer);
+				if (!key.isEmpty()) {
+					data.put(key, value);
+				}
+				
+			} else if (sectionType == (byte) 0xFD) {
+				// key-value with expiry time in seconds
+				long expiryTime = readTimeSeconds(fileBuffer);
+				readString(fileBuffer);
+				String key = readString(fileBuffer);
+				String value = readString(fileBuffer);
+				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTime, 0, java.time.ZoneOffset.UTC);
+				
+				System.out.println("Loaded Key: " + key + " Value: " + value + " Expiry: " + expirationTime);
+
+				if (!key.isEmpty()) {
+					data.put(key, value);
+					expiryTimes.put(key, expirationTime);
+				}
+			} else if (sectionType == (byte) 0xFC) {
+				// key-value with expiry time in milliseconds
+				long expiryTimeMillis = readTimeMS(fileBuffer);
+				readString(fileBuffer);
+				String key = readString(fileBuffer);
+				String value = readString(fileBuffer);
+				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTimeMillis / 1000, (int) (expiryTimeMillis % 1000) * 1_000_000, java.time.ZoneOffset.UTC);
+				
+				System.out.println("Loaded Key: " + key + " Value: " + value + " Expiry: " + expirationTime);
+
+				if (!key.isEmpty()) {
+					data.put(key, value);
+	                expiryTimes.put(key, expirationTime);
+				}
+			} else if (sectionType == (byte) 0xFF) {
+				break;
+			}
+			
+		}
 	}
 	
 	private static String readString(ByteBuffer fileBuffer) {
 		int size = readSize(fileBuffer);
-		byte[] StringBytes = new byte[size];
-		fileBuffer.get(StringBytes);
-		return new String(StringBytes);
+		byte[] stringBytes = new byte[size];
+		fileBuffer.get(stringBytes);
+		String bytesToString = new String(stringBytes);
+		return bytesToString;
+	}
+	
+	private static long readTimeSeconds(ByteBuffer fileBuffer) {
+		int unsigned_int = fileBuffer.getInt();
+		long unixTimeStamp = unsigned_int & 0xFFFFFFFFL;
+		return unixTimeStamp;
+	}
+	
+	private static long readTimeMS(ByteBuffer fileBuffer) {
+		// Java long is already 8 bytes so no need to mask
+		long unsigned_long = fileBuffer.getLong();
+		return unsigned_long;
+		
 	}
 	
 	private static int readSize(ByteBuffer buffer) {
@@ -102,7 +152,7 @@ public class EventLoopServer {
 	            case 0x02: // 0xC2 - 32-bit integer encoding (little-endian)
 	                return buffer.getInt();
 	            default:
-	            	System.out.println("Unknown encoding tpye: " + encodingType);
+	            	System.out.println("Unknown encoding type: " + encodingType);
 	            	buffer.position(buffer.position() + 1);
 	            	return 0;
 	        }
@@ -115,7 +165,7 @@ public class EventLoopServer {
 
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
-			// create Selector for monitoring channels   
+			// create Selector for channel monitoring  
 			Selector selector = Selector.open();
 			// create a non-blocking server socket channel
 			ServerSocketChannel serverChannel = ServerSocketChannel.open();
@@ -219,7 +269,7 @@ public class EventLoopServer {
 									LocalDateTime expirationTime = expiryTimes.get(parts[4]);
 									if (expirationTime != null) {
 										if (LocalDateTime.now().isAfter(expirationTime)) {
-											// the case where the access occurs after the expiration time
+											// the case where the access occurs after the expiration
 											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
 											clientChannel.write(responseBuffer);
 											break;
@@ -255,19 +305,17 @@ public class EventLoopServer {
 									}
 									break;
 								case "KEYS":
-									System.out.println("Received KEYS command");
 									if (parts[4].equals("*")) {
-										System.out.println("Received KEYS * command");
+										System.out.println("KEYS * command received");
+										// StringBuilder allows us to work with a mutable string so we don't have to create a new string with
+										// each of these operations
 										StringBuilder response = new StringBuilder("*").append(data.size()).append("\r\n");
-										data.keySet().forEach(v -> {
-											if (!v.isEmpty()) {
-												response.append("$").append(v.length()).append("\r\n").append(v).append("\r\n");
-											}
+										data.keySet().forEach(k -> {
+											response.append("$").append(k.length()).append("\r\n").append(k).append("\r\n");
 										});
-										clientChannel.write(ByteBuffer.wrap(response.toString().getBytes()));
-									}
-									break;
-									
+										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
+										clientChannel.write(responseBuffer);
+									}									
 								default:
 									break;
 									
