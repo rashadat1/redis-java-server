@@ -62,10 +62,8 @@ public class EventLoopServer {
 		System.out.println("RDB Header Validated: " + headerStr);
 		while (fileBuffer.hasRemaining()) {
 			byte sectionType = fileBuffer.get();
-			if (sectionType == (byte) 0xFE) {
-				continue;
-			} else if (sectionType == (byte) 0x00) {
-				// 00 corresponds to a string encoded key, value pair 
+			if (sectionType == (byte) 0x00) {
+				// 00 corresponds to a string encoded key, value
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				if (!key.isEmpty()) {
@@ -326,8 +324,19 @@ public class EventLoopServer {
 										});
 										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
 										clientChannel.write(responseBuffer);
-									}									
-								default:
+									}
+								case "INFO":
+									if (parts[4].equals("replication")) {
+										System.out.println("INFO Replication command received");
+										StringBuilder response = new StringBuilder("$");
+										
+										String role = (port == 6379) ? "master" : "slave";
+										String info = "# Replication\r\nrole:" + role;
+										response.append(info.length()).append("\r\n").append(info).append("\r\n");
+										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
+										clientChannel.write(responseBuffer);
+									}
+								default: 
 									break;
 									
 								}
