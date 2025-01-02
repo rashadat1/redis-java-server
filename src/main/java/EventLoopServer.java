@@ -1,4 +1,3 @@
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -16,7 +15,8 @@ import java.util.concurrent.ConcurrentHashMap;
 
 // Build Redis
 public class EventLoopServer {
-	private static final int port = 6379;
+	
+	private static int port = 6379;
 	
 	public static Map<String, String> data = new ConcurrentHashMap<>();
 	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
@@ -165,6 +165,18 @@ public class EventLoopServer {
 
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
+			// in order to have leader-follower replication we need to run multiple instances
+			// of Redis server so we can't run them all on 6379
+			for (int i = 0; i < args.length; i++) {
+				if (args[i].equals("--port")) {
+					port = Integer.parseInt(args[i+1]);
+				} else if (args[i].equals("--dir")) {
+					dir = args[i+1];
+				} else if (args[i].equals("--dbfilename")) {
+					dbfilename = args[i+1];
+				}
+			}
+			loadRDBFile();
 			// create Selector for channel monitoring  
 			Selector selector = Selector.open();
 			// create a non-blocking server socket channel
@@ -175,11 +187,10 @@ public class EventLoopServer {
 			serverChannel.bind(new InetSocketAddress(port));
 			serverChannel.register(selector,SelectionKey.OP_ACCEPT);
 			ByteBuffer buffer = ByteBuffer.allocate(256);
+			
 			System.out.println("Server is running on port " + port);
-			if (args.length > 0) {
-				dir = args[1];
-				dbfilename = args[3];
-				loadRDBFile();
+			for (String arg : args ) {
+				System.out.println("Arguments: " + arg);
 			}
 			// Event loop
 			while (true) {
