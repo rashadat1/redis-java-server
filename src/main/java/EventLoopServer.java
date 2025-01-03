@@ -24,6 +24,7 @@ public class EventLoopServer {
 	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
 	private static String dbfilename = null;
+	private static boolean isreplica = false;
 	
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
@@ -133,7 +134,7 @@ public class EventLoopServer {
 	private static long readTimeSeconds(ByteBuffer fileBuffer) {
 		byte[] rawBytes = new byte[4];
 		fileBuffer.get(rawBytes); // read 4 bytes from the buffer
-		ByteBuffer buffer = ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN); // convert to Little-Endian
+		ByteBuffer buffer = ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN); // convert to Little-Endian .wrap() converts to ByteBuffer to allow use of this classes methods
 		
 		int unsigned_int = buffer.getInt() & 0xFFFFFFFF; // convert to unsigned
 		long unixTimeStamp = unsigned_int & 0xFFFFFFFFL; // handle as long
@@ -202,6 +203,8 @@ public class EventLoopServer {
 					dir = args[i+1];
 				} else if (args[i].equals("--dbfilename")) {
 					dbfilename = args[i+1];
+				} else if (args[i].equals("--replicaof")) {
+					isreplica = true;
 				}
 			}
 			loadRDBFile();
@@ -366,7 +369,8 @@ public class EventLoopServer {
 										System.out.println("INFO Replication command received");
 										StringBuilder response = new StringBuilder("$");
 										
-										String role = (port == 6379) ? "master" : "slave";
+										String role = isreplica ? "slave" : "master";
+										
 										String info = "# Replication\r\nrole:" + role;
 										response.append(info.length()).append("\r\n").append(info).append("\r\n");
 										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
