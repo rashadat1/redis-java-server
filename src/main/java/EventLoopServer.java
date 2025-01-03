@@ -1,12 +1,14 @@
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Iterator;
 import java.util.Map;
@@ -60,10 +62,11 @@ public class EventLoopServer {
 			return;
 		}
 		System.out.println("RDB Header Validated: " + headerStr);
+		System.out.println("After header validation, buffer position: " + fileBuffer.position());
 		while (fileBuffer.hasRemaining()) {
 			byte sectionType = fileBuffer.get();
 			if (sectionType == (byte) 0x00) {
-				// 00 corresponds to a string encoded key, value
+				// 00 corresponds to a string encoded key-value pairr
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				if (!key.isEmpty()) {
@@ -74,6 +77,7 @@ public class EventLoopServer {
 				// key-value with expiry time in seconds
 				long expiryTime = readTimeSeconds(fileBuffer);
 				readString(fileBuffer);
+				
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTime, 0, java.time.ZoneOffset.UTC);
@@ -88,6 +92,7 @@ public class EventLoopServer {
 				// key-value with expiry time in milliseconds
 				long expiryTimeMillis = readTimeMS(fileBuffer);
 				readString(fileBuffer);
+
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTimeMillis / 1000, (int) (expiryTimeMillis % 1000) * 1_000_000, java.time.ZoneOffset.UTC);
@@ -98,6 +103,17 @@ public class EventLoopServer {
 					data.put(key, value);
 	                expiryTimes.put(key, expirationTime);
 				}
+			} else if (sectionType == (byte) 0xFE) {
+				// FE 00 indicates a database selector followed by metadata
+				int dbNumber = readSize(fileBuffer);
+				System.out.println("Database Selector: DB " + dbNumber);
+				continue;
+			
+			} else if (sectionType == (byte) 0xFB) {
+				// Indicates fields for the size of the hash tables after FE 00
+				int hashTableSize = readSize(fileBuffer);
+				int expiryTableSize = readSize(fileBuffer);
+			
 			} else if (sectionType == (byte) 0xFF) {
 				break;
 			}
@@ -107,6 +123,7 @@ public class EventLoopServer {
 	
 	private static String readString(ByteBuffer fileBuffer) {
 		int size = readSize(fileBuffer);
+		System.out.println("Parsed size: " + size);
 		byte[] stringBytes = new byte[size];
 		fileBuffer.get(stringBytes);
 		String bytesToString = new String(stringBytes);
@@ -114,14 +131,25 @@ public class EventLoopServer {
 	}
 	
 	private static long readTimeSeconds(ByteBuffer fileBuffer) {
-		int unsigned_int = fileBuffer.getInt();
-		long unixTimeStamp = unsigned_int & 0xFFFFFFFFL;
+		byte[] rawBytes = new byte[4];
+		fileBuffer.get(rawBytes); // read 4 bytes from the buffer
+		ByteBuffer buffer = ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN); // convert to Little-Endian
+		
+		int unsigned_int = buffer.getInt() & 0xFFFFFFFF; // convert to unsigned
+		long unixTimeStamp = unsigned_int & 0xFFFFFFFFL; // handle as long
+		
+		System.out.println("Parsed Expiry Time in S (little-endian): " + unixTimeStamp);
 		return unixTimeStamp;
 	}
 	
 	private static long readTimeMS(ByteBuffer fileBuffer) {
 		// Java long is already 8 bytes so no need to mask
-		long unsigned_long = fileBuffer.getLong();
+		byte[] rawBytes = new byte[8];
+		fileBuffer.get(rawBytes); // read 8 bytes from the buffer
+		ByteBuffer buffer = ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN);  // convert to Little-Endian
+		long unsigned_long = buffer.getLong();
+		
+		System.out.println("Parsed Expiry Time in MS (little-endian): " + unsigned_long);
 		return unsigned_long;
 		
 	}
@@ -129,6 +157,7 @@ public class EventLoopServer {
 	private static int readSize(ByteBuffer buffer) {
 	    byte firstByte = buffer.get();
 	    int firstTwoBits = (firstByte & 0xC0) >> 6;
+	    
 	    if (firstTwoBits == 0) {
 	        // 0b00 - 6-bit size
 	        return firstByte & 0x3F;
@@ -142,6 +171,7 @@ public class EventLoopServer {
 	    } else if (firstTwoBits == 3) {
 	        // 0b11 - Special encoding
 	        int encodingType = firstByte & 0x3F; // The remaining 6 bits tell us the type
+	        System.out.println("Special encoding type: " + Integer.toHexString(encodingType));
 	        switch (encodingType) {
 	            case 0x00: // 0xC0 - 8-bit integer encoding
 	                return buffer.get();
@@ -275,11 +305,15 @@ public class EventLoopServer {
 									clientChannel.write(responseBuffer);
 									break;
 								case "GET":
-									LocalDateTime expirationTime = expiryTimes.get(parts[4]);
-									if (expirationTime != null) {
-										if (LocalDateTime.now().isAfter(expirationTime)) {
+									LocalDateTime expirationLocalDateTime = expiryTimes.get(parts[4]);
+									if (expirationLocalDateTime != null) {
+										Instant expirationTime = expirationLocalDateTime.toInstant(java.time.ZoneOffset.UTC);
+										System.out.println("Expiration Time for key '" + parts[4] + "': " + expirationTime);
+										System.out.println("Current Time: " + Instant.now());
+										if (Instant.now().isAfter(expirationTime)) {
 											// the case where the access occurs after the expiration
 											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
+								            System.out.println("Key '" + parts[4] + "' has expired. Response Sent: $-1");
 											clientChannel.write(responseBuffer);
 											break;
 										}
@@ -290,6 +324,8 @@ public class EventLoopServer {
 									} else {
 										responseBuffer = ByteBuffer.wrap(("$" + key.length() + "\r\n" + key + "\r\n").getBytes());
 									}
+									System.out.println("Key found to send to client: " + key);
+									
 									clientChannel.write(responseBuffer);
 									break;
 								case "CONFIG":
