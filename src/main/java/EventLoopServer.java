@@ -25,6 +25,10 @@ public class EventLoopServer {
 	private static String dir = null;
 	private static String dbfilename = null;
 	private static boolean isreplica = false;
+	public static String master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+	public static int master_repl_offset = 0;
+	private static String master_host = null;
+	private static int master_port = 0;
 	
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
@@ -67,7 +71,7 @@ public class EventLoopServer {
 		while (fileBuffer.hasRemaining()) {
 			byte sectionType = fileBuffer.get();
 			if (sectionType == (byte) 0x00) {
-				// 00 corresponds to a string encoded key-value pairr
+				// 00 corresponds to a string encoded key-value pair
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				if (!key.isEmpty()) {
@@ -96,6 +100,7 @@ public class EventLoopServer {
 
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
+				// convert ms to seconds then pass remainder in nanoseconds as second argument   
 				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTimeMillis / 1000, (int) (expiryTimeMillis % 1000) * 1_000_000, java.time.ZoneOffset.UTC);
 				
 				System.out.println("Loaded Key: " + key + " Value: " + value + " Expiry: " + expirationTime);
@@ -194,8 +199,8 @@ public class EventLoopServer {
 
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
-			// in order to have leader-follower replication we need to run multiple instances
-			// of Redis server so we can't run them all on 6379
+			// parse command line arguments - these include the path for the rdb file, the port we are setting up the server on
+			// and whether the server is a leader or follower
 			for (int i = 0; i < args.length; i++) {
 				if (args[i].equals("--port")) {
 					port = Integer.parseInt(args[i+1]);
@@ -205,7 +210,18 @@ public class EventLoopServer {
 					dbfilename = args[i+1];
 				} else if (args[i].equals("--replicaof")) {
 					isreplica = true;
+					try {
+						master_host = args[i+1];
+						master_port = Integer.parseInt(args[i+2]);
+					} catch (ArrayIndexOutOfBoundsException e){
+						System.out.println("Missing arguments for --replicaof flag: No Host or Port for Master specified");
+					}
 				}
+			}
+			if (isreplica && master_host != null && master_port != 0) {
+				System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
+				SocketChannel masterChannel = SocketChannel.open();
+				
 			}
 			loadRDBFile();
 			// create Selector for channel monitoring  
@@ -370,8 +386,14 @@ public class EventLoopServer {
 										StringBuilder response = new StringBuilder("$");
 										
 										String role = isreplica ? "slave" : "master";
+										String master_id = "";
 										
+
 										String info = "# Replication\r\nrole:" + role;
+										if (role.equals("master")) {
+											master_id += master_replid;
+											info += "\r\nmaster_repl_offset:0\r\nmaster_replid:" + master_id;
+										}
 										response.append(info.length()).append("\r\n").append(info).append("\r\n");
 										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
 										clientChannel.write(responseBuffer);
