@@ -211,16 +211,36 @@ public class EventLoopServer {
 				} else if (args[i].equals("--replicaof")) {
 					isreplica = true;
 					try {
-						master_host = args[i+1];
-						master_port = Integer.parseInt(args[i+2]);
-					} catch (ArrayIndexOutOfBoundsException e){
-						System.out.println("Missing arguments for --replicaof flag: No Host or Port for Master specified");
+						String[] serverLocation = args[i+1].split(" ");
+						master_host = serverLocation[0];
+						master_port = Integer.parseInt(serverLocation[1]);
+					} catch (ArrayIndexOutOfBoundsException | NumberFormatException e){
+						System.out.println("Invalid --replicaof format. Expected: \"<host> <port>\"");
+						isreplica = false; // disable if parsing fails so we do not advance
 					}
 				}
 			}
 			if (isreplica && master_host != null && master_port != 0) {
 				System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
 				SocketChannel masterChannel = SocketChannel.open();
+				masterChannel.connect(new InetSocketAddress(master_host, master_port));
+				
+				String pingCommand = "*1\r\n$4\r\nPING\r\n";
+				masterChannel.write(ByteBuffer.wrap(pingCommand.getBytes()));
+				
+				// read PONG received from Master. If PONG received sends REPLCONF twice to the master
+				ByteBuffer masterBuffer = ByteBuffer.allocate(256);
+				// allocate 256 byte sized buffer
+				int BytesReadFromMaster = masterChannel.read(masterBuffer);
+				// read from masterChannel into the masterBuffer 
+				masterBuffer.flip();
+				String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
+				String[] responseParts = PingResponse.split("\r\n");
+				if (responseParts[2].equalsIgnoreCase("PONG")) {
+					// if true then master responded correctly with PONG
+					System.out.println("Handle replConf");
+				}
+
 				
 			}
 			loadRDBFile();
