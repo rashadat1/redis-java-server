@@ -236,9 +236,21 @@ public class EventLoopServer {
 				masterBuffer.flip();
 				String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
 				String[] responseParts = PingResponse.split("\r\n");
+				masterBuffer.clear();
 				if (responseParts[2].equalsIgnoreCase("PONG")) {
 					// if true then master responded correctly with PONG
-					System.out.println("Handle replConf");
+					System.out.println("Sending replConf");
+					String firstReplConfDescr =  "# REPLCONF listening-port" + port + "\r\n";
+					String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
+					masterChannel.write(ByteBuffer.wrap((firstReplConfDescr + firstReplConf).getBytes()));
+					
+					int BytesReadReplConf = masterChannel.read(masterBuffer);
+					masterBuffer.flip();
+					String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
+					String[] FirstReplConfResponseParts = FirstReplConfResponse.split("\r\n");
+					
+					//  send second repl conf after verifying this is the bulk string OK
+					
 				}
 
 				
