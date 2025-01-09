@@ -235,22 +235,36 @@ public class EventLoopServer {
 				// read from masterChannel into the masterBuffer 
 				masterBuffer.flip();
 				String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
-				String[] responseParts = PingResponse.split("\r\n");
 				masterBuffer.clear();
-				if (responseParts[2].equalsIgnoreCase("PONG")) {
+				System.out.println("Master Response to PING: " + PingResponse);
+				String[] PingParts = PingResponse.split("\r\n");
+				if (PingParts[0].equalsIgnoreCase("+PONG")) {
 					// if true then master responded correctly with PONG
-					System.out.println("Sending replConf");
-					String firstReplConfDescr =  "# REPLCONF listening-port" + port + "\r\n";
+					System.out.println("Sending First ReplConf");
 					String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
-					masterChannel.write(ByteBuffer.wrap((firstReplConfDescr + firstReplConf).getBytes()));
+					masterChannel.write(ByteBuffer.wrap(firstReplConf.getBytes()));
 					
 					int BytesReadReplConf = masterChannel.read(masterBuffer);
 					masterBuffer.flip();
 					String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
-					String[] FirstReplConfResponseParts = FirstReplConfResponse.split("\r\n");
-					
-					//  send second repl conf after verifying this is the bulk string OK
-					
+					masterBuffer.clear();
+					if (!FirstReplConfResponse.contains("OK")) {
+						System.out.println("Failed to receive OK response from Master for REPLCONF 1");
+					} else {
+						System.out.println("Received: " + FirstReplConfResponse + "in response to first REPLCONF command");
+						System.out.println("Sending second REPLCONF command");
+						String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+						masterChannel.write(ByteBuffer.wrap(secondReplConf.getBytes()));
+						
+						int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
+						masterBuffer.flip();
+						String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
+						if (SecondReplConfResponse.contains("OK")) {
+							System.out.println("Master Server replied with OK to both REPLCONF commands");
+							masterBuffer.clear();
+						}
+					}
+										
 				}
 
 				
@@ -411,7 +425,9 @@ public class EventLoopServer {
 										});
 										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
 										clientChannel.write(responseBuffer);
+										break;
 									}
+									break;
 								case "INFO":
 									if (parts[4].equals("replication")) {
 										System.out.println("INFO Replication command received");
@@ -430,6 +446,12 @@ public class EventLoopServer {
 										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
 										clientChannel.write(responseBuffer);
 									}
+									break;
+								case "REPLCONF":
+									System.out.println("REPLCONF command received");
+									responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
+									clientChannel.write(responseBuffer);
+									break;
 								default: 
 									break;
 									
