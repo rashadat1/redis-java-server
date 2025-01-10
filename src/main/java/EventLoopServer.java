@@ -225,8 +225,8 @@ public class EventLoopServer {
 				SocketChannel masterChannel = SocketChannel.open();
 				masterChannel.connect(new InetSocketAddress(master_host, master_port));
 				
-				String pingCommand = "*1\r\n$4\r\nPING\r\n";
-				masterChannel.write(ByteBuffer.wrap(pingCommand.getBytes()));
+				String PingCommand = "*1\r\n$4\r\nPING\r\n";
+				masterChannel.write(ByteBuffer.wrap(PingCommand.getBytes()));
 				
 				// read PONG received from Master. If PONG received sends REPLCONF twice to the master
 				ByteBuffer masterBuffer = ByteBuffer.allocate(256);
@@ -262,7 +262,13 @@ public class EventLoopServer {
 						if (SecondReplConfResponse.contains("OK")) {
 							System.out.println("Master Server replied with OK to both REPLCONF commands");
 							masterBuffer.clear();
+							
+							System.out.println("Sending PSYNC to the master");
+							String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+							masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
+							
 						}
+						
 					}
 										
 				}
