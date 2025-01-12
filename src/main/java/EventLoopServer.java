@@ -259,21 +259,20 @@ public class EventLoopServer {
 						int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
 						masterBuffer.flip();
 						String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
-						if (SecondReplConfResponse.contains("OK")) {
-							System.out.println("Master Server replied with OK to both REPLCONF commands");
-							masterBuffer.clear();
+						if (!SecondReplConfResponse.contains("OK")) {
+                            System.out.println("Failed to receive OK response from Master for REPLCONF 2");
+                        } else {
+                            System.out.println("Master Server replied with OK to both REPLCONF commands");
+                            masterBuffer.clear();
+                                
+                            System.out.println("Sending PSYNC to the master");
+                            String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+                            masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
 							
-							System.out.println("Sending PSYNC to the master");
-							String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-							masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
-							
-						}
-						
+                        }
 					}
 										
-				}
-
-				
+                }	
 			}
 			loadRDBFile();
 			// create Selector for channel monitoring  
@@ -458,6 +457,12 @@ public class EventLoopServer {
 									responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 									clientChannel.write(responseBuffer);
 									break;
+                                case "PSYNC":
+                                    System.out.println("PSYNC command received");
+                                    String response = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
+                                    responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
+                                    System.out.println("RESP Simple String response to PSYNC command: " + response);
+                                    clientChannel.write(responseBuffer);
 								default: 
 									break;
 									
