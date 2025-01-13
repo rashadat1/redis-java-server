@@ -10,11 +10,12 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-
 // Build Redis
 public class EventLoopServer {
 	
@@ -29,6 +30,8 @@ public class EventLoopServer {
 	public static int master_repl_offset = 0;
 	private static String master_host = null;
 	private static int master_port = 0;
+    private static String empty_rdb_contents = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
+    private static List<SocketChannel> replicaSocketList = new ArrayList<>();
 	
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
@@ -195,8 +198,18 @@ public class EventLoopServer {
 	        return 0;
 	    }
 	}
-
-
+    private static byte[] decodeHex(String rdbContents) {
+        int length = rdbContents.length();
+        byte[] data = new byte[length / 2]; // each hex digit (0-9, A-F) is 4 bits so we map pairs to a singular bytes
+        for (int i = 0; i < length; i+=2) {
+            // process two characters at a time to convert them into a single byte of data
+            // hex chars 0 and 1 -> first byte, hex chars 2 and 3 -> second byte, etc
+            // Character.digit returns numerical value of the character in the given base so 'A' would return 10, 'F' -> 15
+            data[i/2] = (byte) ((Character.digit(rdbContents.charAt(i),16) << 4) + Character.digit(rdbContents.charAt(i+1),16));
+            // shift upper 4 bits up by 4 bits
+        }
+        return data;
+    }
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			// parse command line arguments - these include the path for the rdb file, the port we are setting up the server on
@@ -372,7 +385,14 @@ public class EventLoopServer {
 										expiryTimes.put(parts[4], expiryTime); // store the expiration time
 										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 									}
-									clientChannel.write(responseBuffer);
+                                    if (!isreplica) {
+                                        // if this is not a replica we send the "+OK" response back to the client making the request
+                                        // in addition we propagate the request to the replicas in the list
+									    clientChannel.write(responseBuffer);
+                                        for (SocketChannel channel : replicaSocketList) {
+                                            channel.write(ByteBuffer.wrap(message.getBytes()));
+                                        }
+                                    }
 									break;
 								case "GET":
 									LocalDateTime expirationLocalDateTime = expiryTimes.get(parts[4]);
@@ -463,6 +483,21 @@ public class EventLoopServer {
                                     responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
                                     System.out.println("RESP Simple String response to PSYNC command: " + response);
                                     clientChannel.write(responseBuffer);
+                                    // add all replica channels to our replica socket list
+                                    replicaSocketList.add(clientChannel);
+                                    
+                                    // Convert raw hex string for empty RDB file contents into raw binary data (byte array)
+                                    // get the length of the byte array then wrap the content as bytes and send the length  
+                                    // followed by the contents
+                                    byte[] decodedRdb = decodeHex(empty_rdb_contents);
+                                    String rdbHeader = "$" + decodedRdb.length + "\r\n";
+                                    // Send RDB file length header
+                                    clientChannel.write(ByteBuffer.wrap(rdbHeader.getBytes()));
+                                    // Send RDB file contents
+                                    clientChannel.write(ByteBuffer.wrap(decodedRdb));
+                               
+                                    
+                                    break;
 								default: 
 									break;
 									
