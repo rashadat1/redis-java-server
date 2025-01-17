@@ -10,12 +10,12 @@ import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 // Build Redis
 public class EventLoopServer {
 	
@@ -31,7 +31,7 @@ public class EventLoopServer {
 	private static String master_host = null;
 	private static int master_port = 0;
     private static String empty_rdb_contents = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-    private static List<SocketChannel> replicaSocketList = new ArrayList<>();
+    private static List<SocketChannel> replicaSocketList = new CopyOnWriteArrayList<>();
 	
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
@@ -235,21 +235,24 @@ public class EventLoopServer {
     }
     private static void processChannelString(StringBuilder parsedInput) {
         // parse the accumulated buffer and apply complete commands to the replica's state
-        String[] parsedParts = parsedInput.toString().split("\\*");
         while (true) {
-            if (parsedParts.length > 1) {
-                String command = "*" + parsedParts[1]; // take first complete commands
-                if (command.endsWith("\r\n")) {
-                    System.out.println("Processing command: " + command);
-                    processCommand(command);
-                    parsedInput.delete(0, command.length() + 1); // remove the command that we process
-                } else {
-                    // coommand is incommplete need to wait for more data
+        	int starIndex = parsedInput.indexOf("*"); // Start of a new command
+        	if (starIndex == -1) {
+        		// no command to process so return
+        		return;
+        	}
+        	int endIndex = parsedInput.indexOf("\r\n", starIndex);
+        	if (endIndex == -1) {
+        		return; // incomplete command
+        	}
+        	String command = parsedInput.substring(0, endIndex + 2);
+        	if (command.endsWith("\r\n")) {
+                System.out.println("Processing command: " + command);
+                processCommand(command);
+                parsedInput.delete(0, command.length() + 1); // remove the command that we process
+        	} else {
+                    // command is incommplete need to wait for more data
                     break;
-                }
-            } else {
-                // no full command yet
-                return;
             }
         }
     }
@@ -265,7 +268,9 @@ public class EventLoopServer {
                 String value = parts[6];
                 data.put(key,value);
                 System.out.println("Replica Received Set Command: " + key + " : " + value + "from Master");
-
+                break;
+            default:
+            	break;
         }
     }
     public static void parseArgs(String[] args) {
