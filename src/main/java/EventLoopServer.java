@@ -210,84 +210,91 @@ public class EventLoopServer {
         }
         return data;
     }
-	public static void main(String[] args) throws ClosedChannelException {
-		try {
-			// parse command line arguments - these include the path for the rdb file, the port we are setting up the server on
-			// and whether the server is a leader or follower
-			for (int i = 0; i < args.length; i++) {
-				if (args[i].equals("--port")) {
-					port = Integer.parseInt(args[i+1]);
-				} else if (args[i].equals("--dir")) {
-					dir = args[i+1];
-				} else if (args[i].equals("--dbfilename")) {
-					dbfilename = args[i+1];
-				} else if (args[i].equals("--replicaof")) {
-					isreplica = true;
-					try {
-						String[] serverLocation = args[i+1].split(" ");
-						master_host = serverLocation[0];
-						master_port = Integer.parseInt(serverLocation[1]);
-					} catch (ArrayIndexOutOfBoundsException | NumberFormatException e){
-						System.out.println("Invalid --replicaof format. Expected: \"<host> <port>\"");
-						isreplica = false; // disable if parsing fails so we do not advance
-					}
+    // after handshake and RDB transfer, we need to start processing commands from the master
+    private static void processMasterCommands(SocketChannel masterChannel) {
+        ByteBuffer buffer = ByteBuffer.allocate(1024);
+        StringBuilder commandParse = new StringBuilder();
+        try {
+        	while (true) {
+	            // read into byte buffer and get number of bytes read
+	            int bytesRead = masterChannel.read(buffer);
+	            if (bytesRead == -1) {
+	                System.out.println("Master Channel is empty");
+	                break;
+	            } else {
+	                buffer.flip(); // flip to switch from writing to reading mode
+	                String data = new String(buffer.array(),  0, bytesRead);
+	                buffer.clear();
+	                commandParse.append(data); // append data we read from the buffer
+	                processChannelString(commandParse);
+	            }
+	        }
+        } catch (IOException e) {
+        	System.err.println("Error reading from Master: " + e.getMessage());
+        }
+    }
+    private static void processChannelString(StringBuilder parsedInput) {
+        // parse the accumulated buffer and apply complete commands to the replica's state
+        String[] parsedParts = parsedInput.toString().split("\\*");
+        while (true) {
+            if (parsedParts.length > 1) {
+                String command = "*" + parsedParts[1]; // take first complete commands
+                if (command.endsWith("\r\n")) {
+                    System.out.println("Processing command: " + command);
+                    processCommand(command);
+                    parsedInput.delete(0, command.length() + 1); // remove the command that we process
+                } else {
+                    // coommand is incommplete need to wait for more data
+                    break;
+                }
+            } else {
+                // no full command yet
+                return;
+            }
+        }
+    }
+    private static void processCommand(String command) {
+        String[] parts = command.split("\r\n");
+        if (parts.length < 4) {
+            return;
+        }
+        String commandName = parts[2].toUpperCase();
+        switch(commandName) {
+            case "SET":
+                String key = parts[4];
+                String value = parts[6];
+                data.put(key,value);
+                System.out.println("Replica Received Set Command: " + key + " : " + value + "from Master");
+
+        }
+    }
+    public static void parseArgs(String[] args) {
+    	// parse command line arguments - these include the path for the rdb file, the port we are setting up the server on
+		// and whether the server is a leader or follower
+		for (int i = 0; i < args.length; i++) {
+			if (args[i].equals("--port")) {
+				port = Integer.parseInt(args[i+1]);
+			} else if (args[i].equals("--dir")) {
+				dir = args[i+1];
+			} else if (args[i].equals("--dbfilename")) {
+				dbfilename = args[i+1];
+			} else if (args[i].equals("--replicaof")) {
+				isreplica = true;
+				try {
+					String[] serverLocation = args[i+1].split(" ");
+					master_host = serverLocation[0];
+					master_port = Integer.parseInt(serverLocation[1]);
+				} catch (ArrayIndexOutOfBoundsException | NumberFormatException e) {
+					System.out.println("Invalid --replicaof format. Expected: \"<host> <port>\"");
+					isreplica = false; // disable if parsing fails so we do not advance
 				}
 			}
-			if (isreplica && master_host != null && master_port != 0) {
-				System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
-				SocketChannel masterChannel = SocketChannel.open();
-				masterChannel.connect(new InetSocketAddress(master_host, master_port));
-				
-				String PingCommand = "*1\r\n$4\r\nPING\r\n";
-				masterChannel.write(ByteBuffer.wrap(PingCommand.getBytes()));
-				
-				// read PONG received from Master. If PONG received sends REPLCONF twice to the master
-				ByteBuffer masterBuffer = ByteBuffer.allocate(256);
-				// allocate 256 byte sized buffer
-				int BytesReadFromMaster = masterChannel.read(masterBuffer);
-				// read from masterChannel into the masterBuffer 
-				masterBuffer.flip();
-				String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
-				masterBuffer.clear();
-				System.out.println("Master Response to PING: " + PingResponse);
-				String[] PingParts = PingResponse.split("\r\n");
-				if (PingParts[0].equalsIgnoreCase("+PONG")) {
-					// if true then master responded correctly with PONG
-					System.out.println("Sending First ReplConf");
-					String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
-					masterChannel.write(ByteBuffer.wrap(firstReplConf.getBytes()));
-					
-					int BytesReadReplConf = masterChannel.read(masterBuffer);
-					masterBuffer.flip();
-					String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
-					masterBuffer.clear();
-					if (!FirstReplConfResponse.contains("OK")) {
-						System.out.println("Failed to receive OK response from Master for REPLCONF 1");
-					} else {
-						System.out.println("Received: " + FirstReplConfResponse + "in response to first REPLCONF command");
-						System.out.println("Sending second REPLCONF command");
-						String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-						masterChannel.write(ByteBuffer.wrap(secondReplConf.getBytes()));
-						
-						int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
-						masterBuffer.flip();
-						String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
-						if (!SecondReplConfResponse.contains("OK")) {
-                            System.out.println("Failed to receive OK response from Master for REPLCONF 2");
-                        } else {
-                            System.out.println("Master Server replied with OK to both REPLCONF commands");
-                            masterBuffer.clear();
-                                
-                            System.out.println("Sending PSYNC to the master");
-                            String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-                            masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
-							
-                        }
-					}
-										
-                }	
-			}
-			loadRDBFile();
+		}
+    }
+	public static void main(String[] args) throws ClosedChannelException {
+		try {
+			parseArgs(args);
+			
 			// create Selector for channel monitoring  
 			Selector selector = Selector.open();
 			// create a non-blocking server socket channel
@@ -300,6 +307,71 @@ public class EventLoopServer {
 			ByteBuffer buffer = ByteBuffer.allocate(256);
 			
 			System.out.println("Server is running on port " + port);
+		
+			
+			if (isreplica && master_host != null && master_port != 0) {
+				new Thread(() -> {
+					try {
+						System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
+						SocketChannel masterChannel = SocketChannel.open();
+						masterChannel.connect(new InetSocketAddress(master_host, master_port));
+						
+						String PingCommand = "*1\r\n$4\r\nPING\r\n";
+						masterChannel.write(ByteBuffer.wrap(PingCommand.getBytes()));
+						
+						// read PONG received from Master. If PONG received sends REPLCONF twice to the master
+						ByteBuffer masterBuffer = ByteBuffer.allocate(256);
+						// allocate 256 byte sized buffer
+						int BytesReadFromMaster = masterChannel.read(masterBuffer);
+						// read from masterChannel into the masterBuffer 
+						masterBuffer.flip();
+						String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
+						masterBuffer.clear();
+						System.out.println("Master Response to PING: " + PingResponse);
+						String[] PingParts = PingResponse.split("\r\n");
+						if (PingParts[0].equalsIgnoreCase("+PONG")) {
+							// if true then master responded correctly with PONG
+							System.out.println("Sending First ReplConf");
+							String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
+							masterChannel.write(ByteBuffer.wrap(firstReplConf.getBytes()));
+							
+							int BytesReadReplConf = masterChannel.read(masterBuffer);
+							masterBuffer.flip();
+							String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
+							masterBuffer.clear();
+							if (!FirstReplConfResponse.contains("OK")) {
+								System.out.println("Failed to receive OK response from Master for REPLCONF 1");
+							} else {
+								System.out.println("Received: " + FirstReplConfResponse + "in response to first REPLCONF command");
+								System.out.println("Sending second REPLCONF command");
+								String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+								masterChannel.write(ByteBuffer.wrap(secondReplConf.getBytes()));
+								
+								int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
+								masterBuffer.flip();
+								String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
+								if (!SecondReplConfResponse.contains("OK")) {
+		                            System.out.println("Failed to receive OK response from Master for REPLCONF 2");
+		                        } else {
+		                            System.out.println("Master Server replied with OK to both REPLCONF commands");
+		                            masterBuffer.clear();
+		                                
+		                            System.out.println("Sending PSYNC to the master");
+		                            String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+		                            masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
+		                            masterBuffer.clear();
+
+		                            processMasterCommands(masterChannel);	
+		                        }
+							}
+												
+		                }	
+					} catch (IOException e) {
+						System.err.println("Error during master handshake: " + e.getMessage());
+					}
+				}).start();
+			}
+			loadRDBFile();
 			for (String arg : args ) {
 				System.out.println("Arguments: " + arg);
 			}
@@ -372,6 +444,7 @@ public class EventLoopServer {
 										if (!parts[4].isEmpty()) {
 											data.put(parts[4], parts[6]);
 										}
+                                         
 										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 										expiryTimes.remove(parts[4]); // remove any existing expiration for this key
 										
@@ -495,8 +568,6 @@ public class EventLoopServer {
                                     clientChannel.write(ByteBuffer.wrap(rdbHeader.getBytes()));
                                     // Send RDB file contents
                                     clientChannel.write(ByteBuffer.wrap(decodedRdb));
-                               
-                                    
                                     break;
 								default: 
 									break;
