@@ -1,7 +1,7 @@
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+ import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SelectionKey;
@@ -210,69 +210,6 @@ public class EventLoopServer {
         }
         return data;
     }
-    // after handshake and RDB transfer, we need to start processing commands from the master
-    private static void processMasterCommands(SocketChannel masterChannel) {
-        ByteBuffer buffer = ByteBuffer.allocate(1024);
-        StringBuilder commandParse = new StringBuilder();
-        try {
-        	while (true) {
-	            // read into byte buffer and get number of bytes read
-	            int bytesRead = masterChannel.read(buffer);
-	            if (bytesRead == -1) {
-	                System.out.println("Master Channel is empty");
-	                break;
-	            } else {
-	                buffer.flip(); // flip to switch from writing to reading mode
-	                String data = new String(buffer.array(),  0, bytesRead);
-	                buffer.clear();
-	                commandParse.append(data); // append data we read from the buffer
-	                processChannelString(commandParse);
-	            }
-	        }
-        } catch (IOException e) {
-        	System.err.println("Error reading from Master: " + e.getMessage());
-        }
-    }
-    private static void processChannelString(StringBuilder parsedInput) {
-        // parse the accumulated buffer and apply complete commands to the replica's state
-        while (true) {
-        	int starIndex = parsedInput.indexOf("*"); // Start of a new command
-        	if (starIndex == -1) {
-        		// no command to process so return
-        		return;
-        	}
-        	int endIndex = parsedInput.indexOf("\r\n", starIndex);
-        	if (endIndex == -1) {
-        		return; // incomplete command
-        	}
-        	String command = parsedInput.substring(0, endIndex + 2);
-        	if (command.endsWith("\r\n")) {
-                System.out.println("Processing command: " + command);
-                processCommand(command);
-                parsedInput.delete(0, command.length() + 1); // remove the command that we process
-        	} else {
-                    // command is incommplete need to wait for more data
-                    break;
-            }
-        }
-    }
-    private static void processCommand(String command) {
-        String[] parts = command.split("\r\n");
-        if (parts.length < 4) {
-            return;
-        }
-        String commandName = parts[2].toUpperCase();
-        switch(commandName) {
-            case "SET":
-                String key = parts[4];
-                String value = parts[6];
-                data.put(key,value);
-                System.out.println("Replica Received Set Command: " + key + " : " + value + "from Master");
-                break;
-            default:
-            	break;
-        }
-    }
     public static void parseArgs(String[] args) {
     	// parse command line arguments - these include the path for the rdb file, the port we are setting up the server on
 		// and whether the server is a leader or follower
@@ -315,66 +252,67 @@ public class EventLoopServer {
 		
 			
 			if (isreplica && master_host != null && master_port != 0) {
-				new Thread(() -> {
-					try {
-						System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
-						SocketChannel masterChannel = SocketChannel.open();
-						masterChannel.connect(new InetSocketAddress(master_host, master_port));
+				try {
+					System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
+					SocketChannel masterChannel = SocketChannel.open();
+					masterChannel.connect(new InetSocketAddress(master_host, master_port));
+					
+					String PingCommand = "*1\r\n$4\r\nPING\r\n";
+					masterChannel.write(ByteBuffer.wrap(PingCommand.getBytes()));
+					
+					// read PONG received from Master. If PONG received sends REPLCONF twice to the master
+					ByteBuffer masterBuffer = ByteBuffer.allocate(256);
+					// allocate 256 byte sized buffer
+					int BytesReadFromMaster = masterChannel.read(masterBuffer);
+					// read from masterChannel into the masterBuffer 
+					masterBuffer.flip();
+					String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
+					masterBuffer.clear();
+					System.out.println("Master Response to PING: " + PingResponse);
+					String[] PingParts = PingResponse.split("\r\n");
+					if (PingParts[0].equalsIgnoreCase("+PONG")) {
+						// if true then master responded correctly with PONG
+						System.out.println("Sending First ReplConf");
+						String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
+						masterChannel.write(ByteBuffer.wrap(firstReplConf.getBytes()));
 						
-						String PingCommand = "*1\r\n$4\r\nPING\r\n";
-						masterChannel.write(ByteBuffer.wrap(PingCommand.getBytes()));
-						
-						// read PONG received from Master. If PONG received sends REPLCONF twice to the master
-						ByteBuffer masterBuffer = ByteBuffer.allocate(256);
-						// allocate 256 byte sized buffer
-						int BytesReadFromMaster = masterChannel.read(masterBuffer);
-						// read from masterChannel into the masterBuffer 
+						int BytesReadReplConf = masterChannel.read(masterBuffer);
 						masterBuffer.flip();
-						String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
+						String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
 						masterBuffer.clear();
-						System.out.println("Master Response to PING: " + PingResponse);
-						String[] PingParts = PingResponse.split("\r\n");
-						if (PingParts[0].equalsIgnoreCase("+PONG")) {
-							// if true then master responded correctly with PONG
-							System.out.println("Sending First ReplConf");
-							String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
-							masterChannel.write(ByteBuffer.wrap(firstReplConf.getBytes()));
+						if (!FirstReplConfResponse.contains("OK")) {
+							System.out.println("Failed to receive OK response from Master for REPLCONF 1");
+						} else {
+							System.out.println("Received: " + FirstReplConfResponse + "in response to first REPLCONF command");
+							System.out.println("Sending second REPLCONF command");
+							String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+							masterChannel.write(ByteBuffer.wrap(secondReplConf.getBytes()));
 							
-							int BytesReadReplConf = masterChannel.read(masterBuffer);
+							int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
 							masterBuffer.flip();
-							String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
-							masterBuffer.clear();
-							if (!FirstReplConfResponse.contains("OK")) {
-								System.out.println("Failed to receive OK response from Master for REPLCONF 1");
-							} else {
-								System.out.println("Received: " + FirstReplConfResponse + "in response to first REPLCONF command");
-								System.out.println("Sending second REPLCONF command");
-								String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-								masterChannel.write(ByteBuffer.wrap(secondReplConf.getBytes()));
-								
-								int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
-								masterBuffer.flip();
-								String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
-								if (!SecondReplConfResponse.contains("OK")) {
-		                            System.out.println("Failed to receive OK response from Master for REPLCONF 2");
-		                        } else {
-		                            System.out.println("Master Server replied with OK to both REPLCONF commands");
-		                            masterBuffer.clear();
-		                                
-		                            System.out.println("Sending PSYNC to the master");
-		                            String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-		                            masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
-		                            masterBuffer.clear();
-
-		                            processMasterCommands(masterChannel);	
-		                        }
-							}
-												
-		                }	
-					} catch (IOException e) {
-						System.err.println("Error during master handshake: " + e.getMessage());
-					}
-				}).start();
+							String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
+							if (!SecondReplConfResponse.contains("OK")) {
+	                            System.out.println("Failed to receive OK response from Master for REPLCONF 2");
+	                        } else {
+	                            System.out.println("Master Server replied with OK to both REPLCONF commands");
+	                            masterBuffer.clear();
+	                                
+	                            System.out.println("Sending PSYNC to the master");
+	                            String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+	                            masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
+	                            masterBuffer.clear();
+	                            
+	                            System.out.println("Handshake complete - Registering Master Channel with Selector");
+	        					masterChannel.configureBlocking(false);
+	                            masterChannel.register(selector, SelectionKey.OP_READ, "master");
+	                            
+	                        }
+						}
+											
+	                }	
+				} catch (IOException e) {
+					System.err.println("Error during master handshake: " + e.getMessage());
+				}
 			}
 			loadRDBFile();
 			for (String arg : args ) {
@@ -402,22 +340,24 @@ public class EventLoopServer {
 							// if not clientChannel is a reference to the connection with the client
 							clientChannel.configureBlocking(false);
 							// Register for read events
-							clientChannel.register(selector,  SelectionKey.OP_READ);
+							clientChannel.register(selector,  SelectionKey.OP_READ, "client");
 							System.out.println("New client connected: " + clientChannel.getRemoteAddress());
 						} else {
 							continue;
 						}
 					} else if (currKey.isReadable()) {
 						// check if event on the channel is a READ event
-						SocketChannel clientChannel = (SocketChannel) currKey.channel();
+						SocketChannel channel = (SocketChannel) currKey.channel();
+						String sourceType = (String) currKey.attachment(); // retrieve metadata - master or client
+						System.out.println("Reading from " + sourceType + " channel");
 						// Read data from the client
 						buffer.clear();
 						// clears the byte buffer to prepare it for a new read operation
-						int bytesRead = clientChannel.read(buffer); // .read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
+						int bytesRead = channel.read(buffer); // .read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
 						if (bytesRead == -1) {
-							System.out.println("Client disconnected: " + clientChannel.getRemoteAddress());
+							System.out.println("Channel disconnected: " + channel.getRemoteAddress());
 							currKey.cancel(); // cancel the key and remove it from the Selector
-							clientChannel.close();
+							channel.close();
 							continue; // continue to the next key
 						}
 						buffer.flip(); 
@@ -426,158 +366,167 @@ public class EventLoopServer {
 						String message = new String(buffer.array(), 0, bytesRead);
 						// buffer.array is the byte array backing the buffer 0 and bytesRead are the starting and ending points of the read
 						System.out.println("Message Received " + message);
-						String[] parts = message.split("\r\n");
-						
-						if (parts.length >= 2) {
-							String command = parts[2].toUpperCase();
-							ByteBuffer responseBuffer = null;
-							switch(command) {
-								case "PING":
-									responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
-									clientChannel.write(responseBuffer);
-									break;
-								case "ECHO":
-									System.out.println("Echo Argument: " + parts[4]);
-									// parts[3] = $[length of echo argument]
-									responseBuffer = ByteBuffer.wrap((parts[3] + "\r\n" + parts[4] + "\r\n").getBytes());
-									clientChannel.write(responseBuffer);
-									break;
-								case "SET":
-									// Set command without PX
-									System.out.println("Set Command key: " + parts[4] + "\r\nSet Command value: " + parts[6]);
-									if (parts.length == 7) {
-										if (!parts[4].isEmpty()) {
-											data.put(parts[4], parts[6]);
-										}
-                                         
-										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-										expiryTimes.remove(parts[4]); // remove any existing expiration for this key
-										
-									} else if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
-										// Set command with PX to set expiration
-										if (!parts[4].isEmpty()) {
-											data.put(parts[4],  parts[6]);
-										}
-										long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
-										LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
-										expiryTimes.put(parts[4], expiryTime); // store the expiration time
-										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-									}
-                                    if (!isreplica) {
-                                        // if this is not a replica we send the "+OK" response back to the client making the request
-                                        // in addition we propagate the request to the replicas in the list
-									    clientChannel.write(responseBuffer);
-                                        for (SocketChannel channel : replicaSocketList) {
-                                            channel.write(ByteBuffer.wrap(message.getBytes()));
-                                        }
-                                    }
-									break;
-								case "GET":
-									LocalDateTime expirationLocalDateTime = expiryTimes.get(parts[4]);
-									if (expirationLocalDateTime != null) {
-										Instant expirationTime = expirationLocalDateTime.toInstant(java.time.ZoneOffset.UTC);
-										System.out.println("Expiration Time for key '" + parts[4] + "': " + expirationTime);
-										System.out.println("Current Time: " + Instant.now());
-										if (Instant.now().isAfter(expirationTime)) {
-											// the case where the access occurs after the expiration
-											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
-								            System.out.println("Key '" + parts[4] + "' has expired. Response Sent: $-1");
-											clientChannel.write(responseBuffer);
-											break;
-										}
-									}
-									String key = data.get(parts[4]);
-									if (key == null) {
-										responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
-									} else {
-										responseBuffer = ByteBuffer.wrap(("$" + key.length() + "\r\n" + key + "\r\n").getBytes());
-									}
-									System.out.println("Key found to send to client: " + key);
-									
-									clientChannel.write(responseBuffer);
-									break;
-								case "CONFIG":
-									String commandStr = null;
-									String paramValue = null;
-									String prefix = "*2\r\n";
-									String parameterName = parts[6];
-									
-									if (parts[4].equals("GET")) {
-										// use .equals() for string comparison "==" is for reference comparison
-										System.out.println("Received CONFIG GET Command");
-										if (parameterName.equals("dir")) {
-											commandStr = "$3\r\ndir\r\n";
-											paramValue = dir != null ? dir : "";
-											
-										} else if (parameterName.equals("dbfilename")) {
-											commandStr = "$10\r\ndbfilename\r\n";
-											paramValue = dbfilename != null ? dbfilename: "";
-										}
-									responseBuffer = ByteBuffer.wrap((prefix + commandStr + "$" + paramValue.length() + "\r\n" + paramValue + "\r\n").getBytes());
-									clientChannel.write(responseBuffer);
-									}
-									break;
-								case "KEYS":
-									if (parts[4].equals("*")) {
-										System.out.println("KEYS * command received");
-										// StringBuilder allows us to work with a mutable string so we don't have to create a new string with
-										// each of these operations
-										StringBuilder response = new StringBuilder("*").append(data.size()).append("\r\n");
-										data.keySet().forEach(k -> {
-											response.append("$").append(k.length()).append("\r\n").append(k).append("\r\n");
-										});
-										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
-										clientChannel.write(responseBuffer);
+						String[] subcommands = message.split("\\*");
+						for (String subcommand : subcommands) {
+							if (subcommand.isEmpty()) {
+								continue;
+							}
+							subcommand = "*" + subcommand;
+							System.out.println("Received subcommand: " + subcommand);
+							String[] parts = subcommand.split("\r\n");
+							
+							if (parts.length >= 2) {
+								String command = parts[2].toUpperCase();
+								ByteBuffer responseBuffer = null;
+								switch(command) {
+									case "PING":
+										responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
+										channel.write(responseBuffer);
 										break;
-									}
-									break;
-								case "INFO":
-									if (parts[4].equals("replication")) {
-										System.out.println("INFO Replication command received");
-										StringBuilder response = new StringBuilder("$");
-										
-										String role = isreplica ? "slave" : "master";
-										String master_id = "";
-										
-
-										String info = "# Replication\r\nrole:" + role;
-										if (role.equals("master")) {
-											master_id += master_replid;
-											info += "\r\nmaster_repl_offset:0\r\nmaster_replid:" + master_id;
+									case "ECHO":
+										System.out.println("Echo Argument: " + parts[4]);
+										// parts[3] = $[length of echo argument]
+										responseBuffer = ByteBuffer.wrap((parts[3] + "\r\n" + parts[4] + "\r\n").getBytes());
+										channel.write(responseBuffer);
+										break;
+									case "SET":
+										// Set command without PX
+										System.out.println("Set Command key: " + parts[4] + "\r\nSet Command value: " + parts[6]);
+										if (parts.length == 7) {
+											if (!parts[4].isEmpty()) {
+												data.put(parts[4], parts[6]);
+											}
+	                                         
+											responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
+											expiryTimes.remove(parts[4]); // remove any existing expiration for this key
+											
+										} else if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
+											// Set command with PX to set expiration
+											if (!parts[4].isEmpty()) {
+												data.put(parts[4],  parts[6]);
+											}
+											long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
+											LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
+											expiryTimes.put(parts[4], expiryTime); // store the expiration time
+											responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 										}
-										response.append(info.length()).append("\r\n").append(info).append("\r\n");
-										responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
-										clientChannel.write(responseBuffer);
-									}
-									break;
-								case "REPLCONF":
-									System.out.println("REPLCONF command received");
-									responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-									clientChannel.write(responseBuffer);
-									break;
-                                case "PSYNC":
-                                    System.out.println("PSYNC command received");
-                                    String response = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
-                                    responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
-                                    System.out.println("RESP Simple String response to PSYNC command: " + response);
-                                    clientChannel.write(responseBuffer);
-                                    // add all replica channels to our replica socket list
-                                    replicaSocketList.add(clientChannel);
-                                    
-                                    // Convert raw hex string for empty RDB file contents into raw binary data (byte array)
-                                    // get the length of the byte array then wrap the content as bytes and send the length  
-                                    // followed by the contents
-                                    byte[] decodedRdb = decodeHex(empty_rdb_contents);
-                                    String rdbHeader = "$" + decodedRdb.length + "\r\n";
-                                    // Send RDB file length header
-                                    clientChannel.write(ByteBuffer.wrap(rdbHeader.getBytes()));
-                                    // Send RDB file contents
-                                    clientChannel.write(ByteBuffer.wrap(decodedRdb));
-                                    break;
-								default: 
-									break;
-									
+	                                    if (!isreplica) {
+	                                        // if this is the master we send the "+OK" response back to the client making the request
+	                                        // in addition we propagate the request to the replicas in the list
+										    channel.write(responseBuffer);
+	                                        for (SocketChannel channelreplica : replicaSocketList) {
+	                                            channelreplica.write(ByteBuffer.wrap(message.getBytes()));
+	                                        }
+	                                    }
+										break;
+									case "GET":
+										LocalDateTime expirationLocalDateTime = expiryTimes.get(parts[4]);
+										if (expirationLocalDateTime != null) {
+											Instant expirationTime = expirationLocalDateTime.toInstant(java.time.ZoneOffset.UTC);
+											System.out.println("Expiration Time for key '" + parts[4] + "': " + expirationTime);
+											System.out.println("Current Time: " + Instant.now());
+											if (Instant.now().isAfter(expirationTime)) {
+												// the case where the access occurs after the expiration
+												responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
+									            System.out.println("Key '" + parts[4] + "' has expired. Response Sent: $-1");
+												channel.write(responseBuffer);
+												break;
+											}
+										}
+										String key = data.get(parts[4]);
+										if (key == null) {
+											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
+										} else {
+											responseBuffer = ByteBuffer.wrap(("$" + key.length() + "\r\n" + key + "\r\n").getBytes());
+										}
+										System.out.println("Key found to send to client: " + key);
+										
+										channel.write(responseBuffer);
+										break;
+									case "CONFIG":
+										String commandStr = null;
+										String paramValue = null;
+										String prefix = "*2\r\n";
+										String parameterName = parts[6];
+										
+										if (parts[4].equals("GET")) {
+											// use .equals() for string comparison "==" is for reference comparison
+											System.out.println("Received CONFIG GET Command");
+											if (parameterName.equals("dir")) {
+												commandStr = "$3\r\ndir\r\n";
+												paramValue = dir != null ? dir : "";
+												
+											} else if (parameterName.equals("dbfilename")) {
+												commandStr = "$10\r\ndbfilename\r\n";
+												paramValue = dbfilename != null ? dbfilename: "";
+											}
+										responseBuffer = ByteBuffer.wrap((prefix + commandStr + "$" + paramValue.length() + "\r\n" + paramValue + "\r\n").getBytes());
+										channel.write(responseBuffer);
+										}
+										break;
+									case "KEYS":
+                                        if (parts.length <= 4) {
+                                            System.out.println("KEYS command received");
+                                        } else if (parts[4].equals("*")) {
+											System.out.println("KEYS * command received");
+											// StringBuilder allows us to work with a mutable string so we don't have to create a new string with
+											// each of these operations
+                                        }
+                                        StringBuilder KeysResponse = new StringBuilder("*").append(data.size()).append("\r\n");
+                                        data.keySet().forEach(k -> {
+                                            KeysResponse.append("$").append(k.length()).append("\r\n").append(k).append("\r\n");
+                                        });
+                                        responseBuffer = ByteBuffer.wrap(KeysResponse.toString().getBytes());
+                                        channel.write(responseBuffer);
+                                        break;
+									case "INFO":
+										if (parts[4].equals("replication")) {
+											System.out.println("INFO Replication command received");
+											StringBuilder InfoResponse = new StringBuilder("$");
+											
+											String role = isreplica ? "slave" : "master";
+											String master_id = "";
+											
+	
+											String info = "# Replication\r\nrole:" + role;
+											if (role.equals("master")) {
+												master_id += master_replid;
+												info += "\r\nmaster_repl_offset:0\r\nmaster_replid:" + master_id;
+											}
+											InfoResponse.append(info.length()).append("\r\n").append(info).append("\r\n");
+											responseBuffer = ByteBuffer.wrap(InfoResponse.toString().getBytes());
+											channel.write(responseBuffer);
+										}
+										break;
+									case "REPLCONF":
+										System.out.println("REPLCONF command received");
+										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
+										channel.write(responseBuffer);
+										break;
+	                                case "PSYNC":
+	                                    System.out.println("PSYNC command received");
+	                                    String PsyncResponse = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
+	                                    responseBuffer = ByteBuffer.wrap(PsyncResponse.toString().getBytes());
+	                                    //System.out.println("RESP Simple String response to PSYNC command: " + response);
+	                                    channel.write(responseBuffer);
+	                                    // add all replica channels to our replica socket list
+	                                    replicaSocketList.add(channel);
+	                                    
+	                                    // Convert raw hex string for empty RDB file contents into raw binary data (byte array)
+	                                    // get the length of the byte array then wrap the content as bytes and send the length  
+	                                    // followed by the contents
+	                                    byte[] decodedRdb = decodeHex(empty_rdb_contents);
+	                                    String rdbHeader = "$" + decodedRdb.length + "\r\n";
+	                                    // Send RDB file length header
+	                                    channel.write(ByteBuffer.wrap(rdbHeader.getBytes()));
+	                                    // Send RDB file contents
+	                                    channel.write(ByteBuffer.wrap(decodedRdb));
+	                                    break;
+									default: 
+										break;
 								}
+									
+							}
 						}
 					}
 				}
