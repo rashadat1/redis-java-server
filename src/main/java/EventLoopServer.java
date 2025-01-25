@@ -32,7 +32,7 @@ public class EventLoopServer {
 	private static int master_port = 0;
     private static String empty_rdb_contents = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
     private static List<SocketChannel> replicaSocketList = new CopyOnWriteArrayList<>();
-	
+	private static int replConfOffset = 0;
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
 			System.out.println("No RDB file specified.");
@@ -499,6 +499,10 @@ public class EventLoopServer {
 										}
 										break;
 									case "REPLCONF":
+                                        if (parts[4].equals("GETACK")) {
+
+                                        }
+                                        else {}
 										System.out.println("REPLCONF command received");
 										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 										channel.write(responseBuffer);
