@@ -381,13 +381,17 @@ public class EventLoopServer {
 								switch(command) {
 									case "PING":
 										responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
-										channel.write(responseBuffer);
+                                        if (!isreplica) {
+										    channel.write(responseBuffer);
+                                        }
 										break;
 									case "ECHO":
 										System.out.println("Echo Argument: " + parts[4]);
 										// parts[3] = $[length of echo argument]
 										responseBuffer = ByteBuffer.wrap((parts[3] + "\r\n" + parts[4] + "\r\n").getBytes());
-										channel.write(responseBuffer);
+                                        if (!isreplica) {
+										    channel.write(responseBuffer);
+                                        }
 										break;
 									case "SET":
 										// Set command without PX
@@ -498,15 +502,29 @@ public class EventLoopServer {
 											channel.write(responseBuffer);
 										}
 										break;
-									case "REPLCONF":
-                                        if (parts[4].equals("GETACK")) {
 
+									case "REPLCONF":
+                                        for (String part : parts) {
+                                            System.out.println("Printing parts: " + part);
                                         }
-                                        else {}
-										System.out.println("REPLCONF command received");
-										responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-										channel.write(responseBuffer);
-										break;
+                                        if (parts.length >= 4 && parts[4].equals("GETACK")) {
+                                            System.out.println("REPLCONF GETACK command received from master");
+                                            StringBuilder response = new StringBuilder("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n");
+                                            response.append(replConfOffset);
+                                            response.append("\r\n");
+                                            responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
+                                            channel.write(responseBuffer);
+                                        } else {
+                                            System.out.println("REPLCONF command received");
+                                            responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
+                                            // the only command we want the replica to respond to is a REPLCONF GETACK
+                                            // all other commands (e.g. SET and PIN) should be read and processed but no response sent to master
+                                            if (!isreplica) {
+                                                channel.write(responseBuffer);
+                                            }
+                                            break;
+                                        }
+                                        break;
 	                                case "PSYNC":
 	                                    System.out.println("PSYNC command received");
 	                                    String PsyncResponse = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
