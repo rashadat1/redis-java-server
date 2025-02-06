@@ -1,7 +1,7 @@
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.net.InetSocketAddress; import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+ import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SelectionKey;
@@ -11,12 +11,11 @@ import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.ArrayList;
-import java.util.List;
 // Build Redis
 public class EventLoopServer {
 	
