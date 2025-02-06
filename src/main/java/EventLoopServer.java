@@ -1,7 +1,7 @@
+import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
- import java.nio.ByteOrder;
+import java.net.InetSocketAddress; import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.FileChannel;
 import java.nio.channels.SelectionKey;
@@ -11,11 +11,12 @@ import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.ArrayList;
+import java.util.List;
 // Build Redis
 public class EventLoopServer {
 	
@@ -365,7 +366,6 @@ public class EventLoopServer {
 						// and resets the position to 0 so we can start reading at the beginning of the buffer
 						String message = new String(buffer.array(), 0, bytesRead);
 						// buffer.array is the byte array backing the buffer 0 and bytesRead are the starting and ending points of the read
-						System.out.println("Message Received " + message);
 						String[] subcommands = message.split("\\*");
 						for (String subcommand : subcommands) {
 							if (subcommand.isEmpty()) {
@@ -378,6 +378,13 @@ public class EventLoopServer {
 							if (parts.length >= 2) {
 								String command = parts[2].toUpperCase();
 								ByteBuffer responseBuffer = null;
+                                if (!subcommand.contains("FULLRESYNC") && !subcommand.contains("GETACK")) {
+
+                                    replConfOffset = replConfOffset + subcommand.getBytes().length;
+                                    System.out.println("Num Bytes read is: " + replConfOffset);
+
+                                }
+                
 								switch(command) {
 									case "PING":
 										responseBuffer = ByteBuffer.wrap("+PONG\r\n".getBytes());
@@ -504,16 +511,20 @@ public class EventLoopServer {
 										break;
 
 									case "REPLCONF":
-                                        for (String part : parts) {
-                                            System.out.println("Printing parts: " + part);
-                                        }
                                         if (parts.length >= 4 && parts[4].equals("GETACK")) {
                                             System.out.println("REPLCONF GETACK command received from master");
-                                            StringBuilder response = new StringBuilder("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$1\r\n");
+                                            
+                                            StringBuilder response = new StringBuilder("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n");
+                                            response.append("$" + Integer.toString(replConfOffset).getBytes().length);
+                                            response.append("\r\n");
                                             response.append(replConfOffset);
                                             response.append("\r\n");
                                             responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
                                             channel.write(responseBuffer);
+                                            System.out.println("Adding REPLCONF GETACK Bytes: " + subcommand.getBytes().length + "*\r\n".getBytes().length);
+                                            replConfOffset += subcommand.getBytes().length;
+                                            // */r/n is trimmed off of this command by the subcommand parsing so we need to account for these bytes
+                                            replConfOffset += "*\r\n".getBytes().length; 
                                         } else {
                                             System.out.println("REPLCONF command received");
                                             responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
@@ -529,7 +540,6 @@ public class EventLoopServer {
 	                                    System.out.println("PSYNC command received");
 	                                    String PsyncResponse = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
 	                                    responseBuffer = ByteBuffer.wrap(PsyncResponse.toString().getBytes());
-	                                    //System.out.println("RESP Simple String response to PSYNC command: " + response);
 	                                    channel.write(responseBuffer);
 	                                    // add all replica channels to our replica socket list
 	                                    replicaSocketList.add(channel);
@@ -545,11 +555,12 @@ public class EventLoopServer {
 	                                    channel.write(ByteBuffer.wrap(decodedRdb));
 	                                    break;
 									default: 
-										break;
+					    				break;
+
 								}
 									
 							}
-						}
+                        }
 					}
 				}
 			}
