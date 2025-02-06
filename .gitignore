@@ -3,3 +3,4 @@ target/
 .idea/
 .codecrafters/
 .DS_Store
+org.eclipse.core.resources.prefs
