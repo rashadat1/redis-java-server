@@ -18,6 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.ArrayList;
 import java.util.List;
+import java.nio.charset.StandardCharsets;
 // Build Redis
 public class EventLoopServer {
 	
@@ -36,8 +37,9 @@ public class EventLoopServer {
     private static List<SocketChannel> replicaSocketList = new CopyOnWriteArrayList<>();
 	private static int replConfOffset = 0;
     private static int acknowledgedReplicas = 0;
+    private static int writeOffset = 0;
     private static WaitRequest waitRequest = null;
-
+    private static int parsedREPLACK = 0;
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
 			System.out.println("No RDB file specified.");
@@ -355,22 +357,24 @@ public class EventLoopServer {
 						// check if event on the channel is a READ event
 						SocketChannel channel = (SocketChannel) currKey.channel();
 						String sourceType = (String) currKey.attachment(); // retrieve metadata - master or client
-						System.out.println("Reading from " + sourceType + " channel");
-						// Read data from the client
-						buffer.clear();
+						System.out.println("Reading from " + sourceType + " channel" + channel.getRemoteAddress());
+
+                        buffer.clear();
 						// clears the byte buffer to prepare it for a new read operation
-						int bytesRead = channel.read(buffer); // .read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
+						int bytesRead = channel.read(buffer); // read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
 						if (bytesRead == -1) {
 							System.out.println("Channel disconnected: " + channel.getRemoteAddress());
 							currKey.cancel(); // cancel the key and remove it from the Selector
 							channel.close();
 							continue; // continue to the next key
 						}
-						buffer.flip(); 
+						buffer.flip();
+                        System.out.println(sourceType + " reading " + bytesRead + " bytes");
+                        System.out.println("Raw received message: [" + new String(buffer.array(), 0, bytesRead) + "]");
 						// prepares the ByteBuffer for reading the data it has received - set buffer limit to the current position
 						// and resets the position to 0 so we can start reading at the beginning of the buffer
 						String message = new String(buffer.array(), 0, bytesRead);
-						// buffer.array is the byte array backing the buffer 0 and bytesRead are the starting and ending points of the read
+						// buffer.array is the byte array backing the :wantbuffer 0 and bytesRead are the starting and ending points of the read
 						String[] subcommands = message.split("\\*");
 						for (String subcommand : subcommands) {
 							if (subcommand.isEmpty()) {
@@ -386,7 +390,7 @@ public class EventLoopServer {
                                 if (!subcommand.contains("FULLRESYNC") && !subcommand.contains("GETACK")) {
 
                                     replConfOffset = replConfOffset + subcommand.getBytes().length;
-                                    System.out.println("Num Bytes read is: " + replConfOffset);
+                                    //System.out.println("Num Bytes read is: " + replConfOffset);
 
                                 }
                                 
@@ -401,7 +405,6 @@ public class EventLoopServer {
 										break;
 									case "ECHO":
 										System.out.println("Echo Argument: " + parts[4]);
-										// parts[3] = $[length of echo argument]
                                         String echoResponse = parts[3] + "\r\n" + parts[4] + "\r\n"; 
 										responseBuffer = ByteBuffer.wrap(echoResponse.getBytes());
                                         if (!isreplica) {
@@ -433,6 +436,7 @@ public class EventLoopServer {
 	                                    if (!isreplica) {
 	                                        // if this is the master we send the "+OK" response back to the client making the request
 	                                        // in addition we propagate the request to the replicas in the list
+                                            writeOffset += 1;
 										    channel.write(responseBuffer);
                                             master_repl_offset += message.getBytes().length;
 	                                        for (SocketChannel channelreplica : replicaSocketList) {
@@ -525,7 +529,7 @@ public class EventLoopServer {
                                             System.out.println("REPLCONF GETACK command received from master");
                                             
                                             StringBuilder response = new StringBuilder("*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n");
-                                            response.append("$" + Integer.toString(replConfOffset).getBytes().length);
+                                            response.append("$" + Integer.toString(replConfOffset).length());
                                             response.append("\r\n");
                                             response.append(replConfOffset);
                                             response.append("\r\n");
@@ -534,19 +538,27 @@ public class EventLoopServer {
                                             System.out.println("Adding REPLCONF GETACK Bytes: " + subcommand.getBytes().length + "*\r\n".getBytes().length);
                                             replConfOffset += subcommand.getBytes().length;
                                             // */r/n is trimmed off of this command by the subcommand parsing so we need to account for these bytes
-                                            replConfOffset += "*\r\n".getBytes().length; 
+                                            replConfOffset += "*\r\n".getBytes().length;
                                         } else if (parts.length >= 4 && parts[4].equals("ACK")) {
-                                            int replConfOffset = Integer.parseInt(parts[5]);
+                                            parsedREPLACK++;
+                                            int replConfOffset = Integer.parseInt(parts[6]);
                                             if (waitRequest != null) {
                                                 System.out.println("Received ACK command from Wait");
-                                                if (replConfOffset >= master_repl_offset) {
+                                                if (replConfOffset > 0) {
+                                                    System.out.println("Count of replicas that are synced with master increased by 1");
                                                     acknowledgedReplicas++; // count replica if it is synced to master
+                                                    System.out.println("Acknowledged Replicas: " + acknowledgedReplicas);
+                                                    System.out.println("Current Time: " + System.currentTimeMillis());
+                                                    System.out.println("Expiry: " + waitRequest.timeOut);
                                                 }
-                                                if (acknowledgedReplicas >= waitRequest.numReplicas || System.currentTimeMillis() >= waitRequest.timeOut) {
+                                                if (acknowledgedReplicas >= waitRequest.numReplicas || System.currentTimeMillis() >= waitRequest.timeOut || parsedREPLACK == replicaSocketList.size()) {
+                                                    System.out.println("Wait command completed returning: " + ":" + acknowledgedReplicas + "\r\n");
                                                     responseBuffer = ByteBuffer.wrap((":" + acknowledgedReplicas + "\r\n").getBytes());
                                                     waitRequest.channel.write(responseBuffer);
                                                     waitRequest = null;
                                                     master_repl_offset += "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n1\r\n*\r\n".getBytes().length;
+                                                    writeOffset = 0;
+                                                    acknowledgedReplicas = 0;
                                                 }
                                             }
                                             break;
@@ -556,7 +568,7 @@ public class EventLoopServer {
                                             System.out.println("REPLCONF command received");
                                             responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
                                             // the only command we want the replica to respond to is a REPLCONF GETACK
-                                            // all other commands (e.g. SET and PIN) should be read and processed but no response sent to master
+                                            // all other commands (e.g. SET) should be read and processed but no response sent to master
                                             if (!isreplica) {
                                                 channel.write(responseBuffer);
                                             }
@@ -570,9 +582,7 @@ public class EventLoopServer {
 	                                    String PsyncResponse = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
 	                                    responseBuffer = ByteBuffer.wrap(PsyncResponse.toString().getBytes());
 	                                    channel.write(responseBuffer);
-	                                    // add all replica channels to our replica socket list
-	                                    replicaSocketList.add(channel);
-	                                    
+	                           
 	                                    // Convert raw hex string for empty RDB file contents into raw binary data (byte array)
 	                                    // get the length of the byte array then wrap the content as bytes and send the length  
 	                                    // followed by the contents
@@ -582,10 +592,15 @@ public class EventLoopServer {
 	                                    channel.write(ByteBuffer.wrap(rdbHeader.getBytes()));
 	                                    // Send RDB file contents
 	                                    channel.write(ByteBuffer.wrap(decodedRdb));
+	                                    System.out.println("Added Replica to list: " + channel.getRemoteAddress());
+                                        // register the replica channel with the Selector
+                                        channel.configureBlocking(false);
+                                        channel.register(selector, SelectionKey.OP_READ, "replica");
+                                        System.out.println("Replica registered with selector for OP_READ: " + channel.getRemoteAddress());
+                                    	replicaSocketList.add(channel);
 	                                    break;
                                     case "WAIT":
                                         System.out.println("WAIT command received");
-                                        acknowledgedReplicas = 0;
                                         if (replicaSocketList.size() == 0) {
                                             // if no replicas return immediately
                                             channel.write(ByteBuffer.wrap(":0\r\n".getBytes()));
@@ -597,12 +612,22 @@ public class EventLoopServer {
                                         // store WAIT command details
                                         System.out.println("Creating WaitRequest instance - " + "numReplicas: " + numReplicas + " expiry: " + expiry);
                                         waitRequest = new WaitRequest(numReplicas, expiry, channel);
+                                        if (writeOffset == 0) {
+                                            channel.write(ByteBuffer.wrap((":" + replicaSocketList.size() + "\r\n").getBytes()));
+                                            break;
+                                        }
                                         for (SocketChannel replicaSocket : replicaSocketList) {
                                             // Send REPLCONF GETACK to all replicas
-                                            replicaSocket.write(ByteBuffer.wrap("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".getBytes()));
+                                            ByteBuffer bufferREPL = ByteBuffer.wrap("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n".getBytes());
+                                            while (bufferREPL.hasRemaining()) {
+                                                System.out.println("Buffer remaining: " + bufferREPL.remaining());
+                                                int bytesWritten = replicaSocket.write(bufferREPL);
+                                            }
                                             System.out.println("Sent REPLCONF GETACK to replica: " + replicaSocket.getRemoteAddress());
                                         }
-                                        // break so we do not block here - we want main loop to continue
+                                        int parsedREPLACK = 0;
+                                        selector.wakeup();
+                                        // break so we do not block here - we want the main loop to continue execution
                                         break;
 									default: 
 					    				break;
