@@ -21,7 +21,7 @@ public class EventLoopServer {
 	
 	private static int port = 6379;
 	
-	public static Map<String, String> data = new ConcurrentHashMap<>();
+	public static Map<String, Object> data = new ConcurrentHashMap<>();
 	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
 	private static String dbfilename = null;
@@ -168,7 +168,7 @@ public class EventLoopServer {
 	}
 	
 	private static int readSize(ByteBuffer buffer) {
-		byte firstByte = buffer.get();
+	    byte firstByte = buffer.get();
 	    int firstTwoBits = (firstByte & 0xC0) >> 6;
 	    
 	    if (firstTwoBits == 0) {
@@ -384,7 +384,6 @@ public class EventLoopServer {
 						}
 						buffer.flip();
                         System.out.println(sourceType + " wrote " + bytesRead + " bytes");
-                        System.out.println("Raw received message: [" + new String(buffer.array(), 0, bytesRead) + "]");
 						// prepares the ByteBuffer for reading the data it has received - set buffer limit to the current position
 						// and resets the position to 0 so we can start reading at the beginning of the buffer
 						String message = new String(buffer.array(), 0, bytesRead);
@@ -472,7 +471,7 @@ public class EventLoopServer {
 												break;
 											}
 										}
-										String key = data.get(parts[4]);
+										String key = (String) data.get(parts[4]);
 										if (key == null) {
 											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
 										} else {
@@ -640,6 +639,22 @@ public class EventLoopServer {
                                         }
                                         parsedREPLACK = 0;
                                         // break so we do not block here - we want the main loop to continue execution
+                                        break;
+                                    case "TYPE":
+                                        System.out.println("TYPE command received");
+                                        String keyToFind = parts[4];
+
+                                        Object val = data.getOrDefault(keyToFind, "none");
+                                        StringBuilder typeResponse = new StringBuilder("+");
+                                        if (val == "none") {
+                                            typeResponse.append(val);
+                                        } else if (val.getClass() == String.class) {
+                                            typeResponse.append("string");
+                                        }
+                                        typeResponse.append("\r\n");
+                                        String typeResponseString = typeResponse.toString();
+                                        System.out.println("Sending the following response: " + typeResponseString);
+                                        channel.write(ByteBuffer.wrap(typeResponseString.getBytes()));
                                         break;
 									default: 
 					    				break;
