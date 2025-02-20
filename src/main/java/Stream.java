@@ -24,8 +24,16 @@ public class Stream {
     public Stream() {
         this.root = new StreamNode("");
     }
-    public void insertNode(StreamNode entry, StreamNode child, StreamNode parent) {
+    public void insertNode(String id, int start, int numCharConsumed, StreamNode child, StreamNode parent) {
+        StreamNode intermediateNode = new StreamNode(child.prefix.substring(0,numCharConsumed)); // slice common characters with insert string
+        StreamNode notInInsertNode = new StreamNode(child.prefix.substring(numCharConsumed)); // slice characters not in substring
+        StreamNode newNode = new StreamNode(id.substring(start));
 
+        parent.children.remove(child.prefix);
+        parent.children.put(intermediateNode.prefix, intermediateNode);
+        intermediateNode.children.put(notInInsertNode.prefix, notInInsertNode);
+        intermediateNode.children.put(newNode.prefix, newNode);
+        notInInsertNode.children = child.children;
     }
     public void updateNode(StreamNode entry) {
     }
@@ -42,7 +50,8 @@ public class Stream {
         }
         return i;
     }
-    public void findLongestCommonPrefix(String id) {
+    public void findLongestCommonPrefix(StreamNode entry) {
+        String id = entry.prefix;
         StreamNode curr = this.root;
         int start = 0; // index of end of prefix matched so far
         int end = id.length() - 1;
@@ -68,15 +77,15 @@ public class Stream {
                     // either we are done or we need to move on based on our current position in the node to add
                     if (start == end) {
                         // we reached the end of our insert id finding an exact match
-                        updateNode();
+                        break;
                     } else {
-                        // we have not finished processing the id to insert so proceed
+                        // we have not finished processing the id to insert so proceed because we finished the prefix at the node that matches
                         curr = matchChildPrefixNode;
                     }
                 } else {
-                    // split case
-                    StreamNode newNode = new StreamNode(id.substring(start));
-                    insertNode(newNode, matchChildPrefixNode, curr);
+                    // split case: we did not fully consume the current node's prefix 
+                    insertNode(id, start, numCharConsumed, matchChildPrefixNode, curr);
+                    break;
                 }
                 curr = matchChildPrefixNode;
             } else {
@@ -87,5 +96,38 @@ public class Stream {
                 break;
             }
         }
+    }
+    public void printTree(StreamNode node, String indent) {
+        if (node == null) {
+            return;
+        }
+        System.out.println(indent + "└── " + node.prefix);
+        for (StreamNode child : node.children.values()) {
+            printTree(child, indent + "     ");
+        }
+    }
+    public static void main(String[] args) {
+        Stream stream = new Stream();
+        StreamNode node1 = new StreamNode("1526919030474-0");
+        StreamNode node2 = new StreamNode("1526919030474-1");
+        StreamNode node3 = new StreamNode("1526919030500-0");
+        StreamNode node4 = new StreamNode("9999999999999-0");
+        StreamNode node5 = new StreamNode("9999999950000-0");
+        StreamNode node6 = new StreamNode("1234543212341-0");
+        StreamNode node7 = new StreamNode("1341243231459-0");
+        StreamNode node8 = new StreamNode("1341255555555-0");
+        StreamNode node9 = new StreamNode("1341255555555-1");
+        StreamNode node10 = new StreamNode("1526933000000-0");
+        stream.findLongestCommonPrefix(node1);
+        stream.findLongestCommonPrefix(node2);
+        stream.findLongestCommonPrefix(node3);
+        stream.findLongestCommonPrefix(node4);
+        stream.findLongestCommonPrefix(node5);
+        stream.findLongestCommonPrefix(node6);
+        stream.findLongestCommonPrefix(node7);
+        stream.findLongestCommonPrefix(node8);
+        stream.findLongestCommonPrefix(node9);
+        stream.findLongestCommonPrefix(node10);
+        stream.printTree(stream.root,"");
     }
 }

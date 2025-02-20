@@ -318,7 +318,7 @@ public class EventLoopServer {
 					System.err.println("Error during master handshake: " + e.getMessage());
 				}
 			}
-			loadRDBFile();
+            loadRDBFile();
 			for (String arg : args ) {
 				System.out.println("Arguments: " + arg);
 			}
@@ -655,6 +655,9 @@ public class EventLoopServer {
                                         String typeResponseString = typeResponse.toString();
                                         System.out.println("Sending the following response: " + typeResponseString);
                                         channel.write(ByteBuffer.wrap(typeResponseString.getBytes()));
+                                        break;
+                                    case "XADD":
+                                        System.out.println("XADD command received");
                                         break;
 									default: 
 					    				break;
