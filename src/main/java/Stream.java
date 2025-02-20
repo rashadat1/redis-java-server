@@ -24,10 +24,10 @@ public class Stream {
     public Stream() {
         this.root = new StreamNode("");
     }
-    public void insertNode(String id, int start, int numCharConsumed, StreamNode child, StreamNode parent) {
+    public void pushToTree(StreamNode entry, int start, int numCharConsumed, StreamNode child, StreamNode parent) {
         StreamNode intermediateNode = new StreamNode(child.prefix.substring(0,numCharConsumed)); // slice common characters with insert string
         StreamNode notInInsertNode = new StreamNode(child.prefix.substring(numCharConsumed)); // slice characters not in substring
-        StreamNode newNode = new StreamNode(id.substring(start));
+        StreamNode newNode = new StreamNode(entry.prefix.substring(start), entry.data);
 
         parent.children.remove(child.prefix);
         parent.children.put(intermediateNode.prefix, intermediateNode);
@@ -50,13 +50,13 @@ public class Stream {
         }
         return i;
     }
-    public void findLongestCommonPrefix(StreamNode entry) {
+    public void insertNewNode(StreamNode entry) {
         String id = entry.prefix;
         StreamNode curr = this.root;
         int start = 0; // index of end of prefix matched so far
         int end = id.length() - 1;
         if (curr.children.isEmpty()) {
-            StreamNode newNode = new StreamNode(id);
+            StreamNode newNode = new StreamNode(id, entry.data);
             curr.children.put(id, newNode);
         }
         while (!curr.children.isEmpty()) {
@@ -84,14 +84,14 @@ public class Stream {
                     }
                 } else {
                     // split case: we did not fully consume the current node's prefix 
-                    insertNode(id, start, numCharConsumed, matchChildPrefixNode, curr);
+                    pushToTree(entry, start, numCharConsumed, matchChildPrefixNode, curr);
                     break;
                 }
                 curr = matchChildPrefixNode;
             } else {
                 // if we have reached a point where our remaining prefix no longer has 
                 // a common element amongst the children we need to insert
-                StreamNode newNode = new StreamNode(id.substring(start));
+                StreamNode newNode = new StreamNode(id.substring(start), entry.data);
                 simpleInsertNode(newNode, curr);
                 break;
             }
@@ -118,16 +118,20 @@ public class Stream {
         StreamNode node8 = new StreamNode("1341255555555-0");
         StreamNode node9 = new StreamNode("1341255555555-1");
         StreamNode node10 = new StreamNode("1526933000000-0");
-        stream.findLongestCommonPrefix(node1);
-        stream.findLongestCommonPrefix(node2);
-        stream.findLongestCommonPrefix(node3);
-        stream.findLongestCommonPrefix(node4);
-        stream.findLongestCommonPrefix(node5);
-        stream.findLongestCommonPrefix(node6);
-        stream.findLongestCommonPrefix(node7);
-        stream.findLongestCommonPrefix(node8);
-        stream.findLongestCommonPrefix(node9);
-        stream.findLongestCommonPrefix(node10);
+        StreamNode node11 = new StreamNode("1526933050000-0");
+        stream.insertNewNode(node1);
+        stream.insertNewNode(node2);
+        stream.insertNewNode(node3);
+        stream.insertNewNode(node4);
+        stream.insertNewNode(node5);
+        stream.insertNewNode(node6);
+        stream.insertNewNode(node7);
+        stream.insertNewNode(node8);
+        stream.insertNewNode(node9);
+        stream.insertNewNode(node10);
+        stream.insertNewNode(node11);
         stream.printTree(stream.root,"");
+        System.out.println(stream.getClass());
+        System.out.println(stream.getClass() == Stream.class);
     }
 }

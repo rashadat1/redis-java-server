@@ -1,3 +1,4 @@
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -11,16 +12,18 @@ import java.nio.channels.SocketChannel;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.Iterator;
-import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.HashMap;
+import java.nio.charset.StandardCharsets;
 // Build Redis
 public class EventLoopServer {
 	
 	private static int port = 6379;
-	
 	public static Map<String, Object> data = new ConcurrentHashMap<>();
 	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
@@ -37,6 +40,7 @@ public class EventLoopServer {
     private static int writeOffset = 0;
     private static WaitRequest waitRequest = null;
     private static int parsedREPLACK = 0;
+    private static HashMap<String, Stream> streamMap = new HashMap<>();
 	private static void loadRDBFile() throws IOException {
 		if (dir == null | dbfilename == null) {
 			System.out.println("No RDB file specified.");
@@ -644,12 +648,15 @@ public class EventLoopServer {
                                         System.out.println("TYPE command received");
                                         String keyToFind = parts[4];
 
-                                        Object val = data.getOrDefault(keyToFind, "none");
+                                        Object val = data.getOrDefault(keyToFind, null);
+                                        Object valStream = streamMap.getOrDefault(keyToFind, null);
                                         StringBuilder typeResponse = new StringBuilder("+");
-                                        if (val == "none") {
-                                            typeResponse.append(val);
-                                        } else if (val.getClass() == String.class) {
+                                        if (val == null && valStream == null) {
+                                            typeResponse.append("none");
+                                        } else if (val instanceof String) {
                                             typeResponse.append("string");
+                                        } else if (valStream instanceof Stream) {
+                                            typeResponse.append("stream");
                                         }
                                         typeResponse.append("\r\n");
                                         String typeResponseString = typeResponse.toString();
@@ -658,6 +665,27 @@ public class EventLoopServer {
                                         break;
                                     case "XADD":
                                         System.out.println("XADD command received");
+                                        String streamName = parts[4];
+                                        String streamId = parts[6];
+                                        HashMap <String, Object> streamData = new HashMap<>();
+                                        for (int i = 8; i + 2 < parts.length; i += 4) {
+                                            String streamKey = parts[i];
+                                            String streamVal = parts[i + 2];
+                                            streamData.put(streamKey, streamVal);
+                                        }
+                                        if (!streamMap.containsKey(streamName)) {
+                                            // if there is no stream with this name we create a new one
+                                            Stream newStream = new Stream();
+                                            StreamNode newStreamNode = new StreamNode(streamId, streamData);
+                                            newStream.insertNewNode(newStreamNode);
+                                            streamMap.put(streamName, newStream);
+                                        }
+                                        StringBuilder xaddResponse = new StringBuilder();
+                                        xaddResponse.append("$");
+                                        xaddResponse.append(streamId.length());
+                                        xaddResponse.append("\r\n" + streamId + "\r\n");
+                                        System.out.println("Sending XADD Response: " + xaddResponse.toString());
+                                        channel.write(ByteBuffer.wrap(xaddResponse.toString().getBytes()));
                                         break;
 									default: 
 					    				break;
