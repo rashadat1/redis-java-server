@@ -1,5 +1,4 @@
 import java.util.HashMap;
-
 class StreamNode {
     String prefix;
     HashMap<String,Object> data;
@@ -13,16 +12,18 @@ class StreamNode {
     }
     public StreamNode(String prefix, HashMap<String,Object> data) {
         // constructor for terminal nodes - these do store data
-        this(prefix); // call empty constructor to initialize children and prefix
+        this(prefix); // call empty constructor to initialize children and prefi
         this.data = data;
     }
 }
 
 public class Stream {
     StreamNode root;
+    String lastID;
 
     public Stream() {
         this.root = new StreamNode("");
+        this.lastID = "0-0";
     }
     public void pushToTree(StreamNode entry, int start, int numCharConsumed, StreamNode child, StreamNode parent) {
         StreamNode intermediateNode = new StreamNode(child.prefix.substring(0,numCharConsumed)); // slice common characters with insert string
@@ -34,11 +35,14 @@ public class Stream {
         intermediateNode.children.put(notInInsertNode.prefix, notInInsertNode);
         intermediateNode.children.put(newNode.prefix, newNode);
         notInInsertNode.children = child.children;
+
+        this.lastID = newNode.prefix;
     }
     public void updateNode(StreamNode entry) {
     }
     public void simpleInsertNode(StreamNode entry, StreamNode insertionPlace) {
         insertionPlace.children.put(entry.prefix, entry);
+        this.lastID = entry.prefix;
     }
     public int prefixMatchingEnd(int start, String id, StreamNode curr) {
         // traverse the current node to find the common ancestor with id to insert / search
@@ -50,11 +54,21 @@ public class Stream {
         }
         return i;
     }
-    public void insertNewNode(StreamNode entry) {
+    public boolean insertNewNode(StreamNode entry) {
         String id = entry.prefix;
         StreamNode curr = this.root;
         int start = 0; // index of end of prefix matched so far
         int end = id.length() - 1;
+        String[] entryParts = id.split("-");
+        String[] lastIDParts = this.lastID.split("-");
+        // check if entry.prefix is at least as large as the current lastID
+        if (Long.parseLong(entryParts[0]) < Long.parseLong(lastIDParts[0])) {
+            return false;
+        } else if (Long.parseLong(entryParts[0]) == Long.parseLong(lastIDParts[0])) {
+            if (Long.parseLong(entryParts[1]) <= Long.parseLong(lastIDParts[1])) {
+                return false;
+            }
+        }
         if (curr.children.isEmpty()) {
             StreamNode newNode = new StreamNode(id, entry.data);
             curr.children.put(id, newNode);
@@ -96,6 +110,8 @@ public class Stream {
                 break;
             }
         }
+        return true;
+
     }
     public void printTree(StreamNode node, String indent) {
         if (node == null) {
@@ -119,6 +135,7 @@ public class Stream {
         StreamNode node9 = new StreamNode("1341255555555-1");
         StreamNode node10 = new StreamNode("1526933000000-0");
         StreamNode node11 = new StreamNode("1526933050000-0");
+        StreamNode node12 = new StreamNode("1341243559990-0");
         stream.insertNewNode(node1);
         stream.insertNewNode(node2);
         stream.insertNewNode(node3);
@@ -130,6 +147,7 @@ public class Stream {
         stream.insertNewNode(node9);
         stream.insertNewNode(node10);
         stream.insertNewNode(node11);
+        stream.insertNewNode(node12);
         stream.printTree(stream.root,"");
         System.out.println(stream.getClass());
         System.out.println(stream.getClass() == Stream.class);

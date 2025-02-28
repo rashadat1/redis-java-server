@@ -667,18 +667,39 @@ public class EventLoopServer {
                                         System.out.println("XADD command received");
                                         String streamName = parts[4];
                                         String streamId = parts[6];
+                                        System.out.println("The streamID is: " + streamId); 
+                                        String[] entryParts = streamId.split("-");
+                           
                                         HashMap <String, Object> streamData = new HashMap<>();
                                         for (int i = 8; i + 2 < parts.length; i += 4) {
                                             String streamKey = parts[i];
                                             String streamVal = parts[i + 2];
                                             streamData.put(streamKey, streamVal);
                                         }
+                                        boolean result = true;
                                         if (!streamMap.containsKey(streamName)) {
                                             // if there is no stream with this name we create a new one
                                             Stream newStream = new Stream();
                                             StreamNode newStreamNode = new StreamNode(streamId, streamData);
-                                            newStream.insertNewNode(newStreamNode);
-                                            streamMap.put(streamName, newStream);
+                                            result = newStream.insertNewNode(newStreamNode);
+                                            if (result) {
+                                                streamMap.put(streamName, newStream);
+                                            }
+                                        } else {
+                                            // if there is a stream with this name we try to insert the new node 
+                                            Stream retrievedStream = streamMap.get(streamName);
+                                            StreamNode newStreamNode = new StreamNode(streamId, streamData);
+                                            result = retrievedStream.insertNewNode(newStreamNode);
+                                        }
+                                        if (!result) {
+                                            System.out.println("Stream ID is: " + streamId);
+                                            if (streamId.equals("0-0") || Long.parseLong(entryParts[0]) < Long.parseLong("0")) {
+                                                channel.write(ByteBuffer.wrap("-ERR The ID specified in XADD must be greater than 0-0\r\n".getBytes()));
+                                                break;
+                                            } else {
+                                                channel.write(ByteBuffer.wrap("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n".getBytes()));
+                                                break;
+                                            }
                                         }
                                         StringBuilder xaddResponse = new StringBuilder();
                                         xaddResponse.append("$");
