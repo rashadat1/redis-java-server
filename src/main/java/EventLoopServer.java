@@ -745,8 +745,14 @@ public class EventLoopServer {
                                         String range_start = parts[6];
                                         String range_end = parts[8];
                                         String streamKey = parts[4]; 
+                                        
+                         
                                         Stream streamToQuery = streamMap.get(streamKey);
-                                        System.out.println("Finding all nodes in the range: " + range_start + " " + " to " + range_end);
+
+                                        range_start = (range_start.equals("-")) ? "0-0" : range_start;
+                                        range_end = (range_end.equals("+")) ? streamToQuery.lastID : range_end;
+
+                                        System.out.println("Finding all nodes in the range: " + range_start + " to " + range_end);
                                         ArrayList<NodeWithBuiltPrefix> nodesInRange = streamToQuery.findInRange(range_start, range_end); 
 
                                         Collections.sort(nodesInRange, (a,b) -> a.prefixBuilt.compareTo(b.prefixBuilt));
@@ -761,16 +767,22 @@ public class EventLoopServer {
                                             xrangeResponse.append("*2\r\n");
                                             String retrievedPrefix = node.prefixBuilt;
                                             xrangeResponse.append("$").append(retrievedPrefix.length()).append("\r\n").append(retrievedPrefix).append("\r\n");
-                                            HashMap<String, String> dataInNode = node.node.data;
-                                            int numKeyVals = 2 * dataInNode.size();
-                                            xrangeResponse.append("*").append(numKeyVals).append("\r\n");
-                                            for (String StreamNodeKey: dataInNode.keySet()) {
-                                                int keyLength = StreamNodeKey.length();
-                                                String StreamNodeVal = dataInNode.get(StreamNodeKey);
-                                                int valLength = StreamNodeVal.length();
-                                                xrangeResponse.append("$").append(keyLength).append("\r\n").append(StreamNodeKey).append("\r\n");
-                                                xrangeResponse.append("$").append(valLength).append("\r\n").append(StreamNodeVal).append("\r\n");
+                                            try {
+                                                System.out.println("Attempting to retrieve data at node: " + node.prefixBuilt);
+                                                HashMap<String, String> dataInNode = node.node.data;
+                                                int numKeyVals = 2 * dataInNode.size();
+                                                xrangeResponse.append("*").append(numKeyVals).append("\r\n");
+                                                for (String StreamNodeKey: dataInNode.keySet()) {
+                                                    int keyLength = StreamNodeKey.length();
+                                                    String StreamNodeVal = dataInNode.get(StreamNodeKey);
+                                                    int valLength = StreamNodeVal.length();
+                                                    xrangeResponse.append("$").append(keyLength).append("\r\n").append(StreamNodeKey).append("\r\n");
+                                                    xrangeResponse.append("$").append(valLength).append("\r\n").append(StreamNodeVal).append("\r\n");
+                                                }
+                                            } catch (Error e) {
+                                                e.printStackTrace();
                                             }
+                                            
                                         }
                                         System.out.println("Response to XRANGE: ");
                                         System.out.println(xrangeResponse);

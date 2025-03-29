@@ -32,6 +32,13 @@ public class Stream {
         StreamNode notInInsertNode = new StreamNode(child.prefix.substring(numCharConsumed)); // slice characters not in substring
         StreamNode newNode = new StreamNode(entry.prefix.substring(start), entry.data);
 
+        if (child.data != null) {
+            notInInsertNode.data = new HashMap<>(child.data);
+            // this creates a deep copy not a shallow copy (if our data structure contains mutable data structures - in a shallow copy
+            // we do not create new values for these. So the surface level hashmap containing would be copied but still hold references
+            // to the contained lists, or hashmaps or strings)
+        }
+
         parent.children.remove(child.prefix);
         parent.children.put(intermediateNode.prefix, intermediateNode);
         intermediateNode.children.put(notInInsertNode.prefix, notInInsertNode);
@@ -81,6 +88,8 @@ public class Stream {
         if (curr.children.isEmpty()) {
             StreamNode newNode = new StreamNode(id, entry.data);
             curr.children.put(id, newNode);
+            this.lastID = id;
+            return true;
         }
         while (!curr.children.isEmpty()) {
             StreamNode matchChildPrefixNode = null;
@@ -159,10 +168,6 @@ public class Stream {
         }
         return result;
 
-
-
-        
-
     }
     private boolean checkSeqNum(String prefix, String startTime, String endTime) {
         String[] prefixParts = prefix.split("-");
@@ -171,15 +176,16 @@ public class Stream {
         String seqNum = (prefixParts.length == 2) ? prefixParts[1] : "0";
         String startSeqNum = (startTimeParts.length == 2) ? startTimeParts[1] : "0";
         String endSeqNum = (endTimeParts.length == 2) ? endTimeParts[1] : "0";
-
+        boolean passesStartSeqNumTest = true;
+        boolean passesEndSeqNumTest = true;
         if (Long.parseLong(prefixParts[0]) == Long.parseLong(startTimeParts[0])) {
-            return (Long.parseLong(seqNum) >= Long.parseLong(startSeqNum));
+            passesStartSeqNumTest = (Long.parseLong(seqNum) >= Long.parseLong(startSeqNum));
 
-        } else if (Long.parseLong(prefixParts[0]) == Long.parseLong(endTimeParts[0])) {
-            return (Long.parseLong(seqNum) <= Long.parseLong(endSeqNum));
-        } else {
-            return true;
+        } 
+        if (Long.parseLong(prefixParts[0]) == Long.parseLong(endTimeParts[0])) {
+            passesEndSeqNumTest = (Long.parseLong(seqNum) <= Long.parseLong(endSeqNum));
         }
+        return (passesStartSeqNumTest && passesEndSeqNumTest);
     }
 
     private boolean withinRange(String prefix, String startTime, String endTime) {
@@ -248,6 +254,8 @@ public class Stream {
         StreamNode node2_2 = new StreamNode("0-2");
         StreamNode node2_3 = new StreamNode("0-3");
         StreamNode node2_4 = new StreamNode("0-4");
+        StreamNode node2_12 = new StreamNode("0-12");
+        StreamNode node2_24 = new StreamNode("0-24");
 
         stream2.insertNewNode(node2_1);
         stream2.printTree(stream2.root,"");
