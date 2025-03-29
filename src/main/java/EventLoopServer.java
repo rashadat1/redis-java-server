@@ -745,7 +745,6 @@ public class EventLoopServer {
                                         String range_start = parts[6];
                                         String range_end = parts[8];
                                         String streamKey = parts[4]; 
-                                        
                          
                                         Stream streamToQuery = streamMap.get(streamKey);
 
@@ -788,6 +787,14 @@ public class EventLoopServer {
                                         System.out.println(xrangeResponse);
                                         channel.write(ByteBuffer.wrap(xrangeResponse.toString().getBytes())); 
                                         break;
+                                    case "XREAD":
+                                        System.out.println("XREAD command received");
+                                        ArrayList<String> xreadStreamNames = new ArrayList<>();
+                                        for (int i = 6; i < parts.length - 2; i += 2) {
+                                            xreadStreamNames.add(parts[i]);
+                                        }
+                                        String lowBound = parts[parts.length - 1];
+                                        
 									default: 
 					    				break;
 

@@ -169,6 +169,22 @@ public class Stream {
         return result;
 
     }
+    public ArrayList<NodeWithBuiltPrefix> readAboveBound(String lowBound) {
+        ArrayList<NodeWithBuiltPrefix> result = new ArrayList<>();
+        Stack<NodeWithBuiltPrefix> stack = new Stack<>();
+        NodeWithBuiltPrefix root_prefix = new NodeWithBuiltPrefix(this.root, this.root.prefix);
+        stack.push(root_prefix);
+        while (!stack.isEmpty()) {
+            NodeWithBuiltPrefix node_prefix = stack.pop();
+            StreamNode node = node_prefix.node;
+            String prefixBuiltSoFar = node_prefix.prefixBuilt;
+            for (String child_prefix : node.children.keySet()) {
+                String prefixWithChild = prefixBuiltSoFar + child_prefix;
+
+            }
+        }
+        return result;
+    }
     private boolean checkSeqNum(String prefix, String startTime, String endTime) {
         String[] prefixParts = prefix.split("-");
         String[] startTimeParts = startTime.split("-");
@@ -211,6 +227,17 @@ public class Stream {
         greaterThanStart = (Long.parseLong(paddedPrefix) >= Long.parseLong(startParts[0]));
         lessThanEnd = (Long.parseLong(paddedPrefix) <= Long.parseLong(endParts[0]));
         return (greaterThanStart && lessThanEnd);
+    }
+    private boolean xreadHelper(String prefix, String lowBound) {
+        String[] prefixParts = prefix.split("-");
+        String[] lowBoundParts = lowBound.split("-");
+        String lowBoundMilliSecTime = lowBoundParts[0];
+
+        String paddedPrefix = String.format("%-" + lowBoundMilliSecTime.length() + "s", prefixParts[0]).replace(" ", "0");
+        if (Long.parseLong(paddedPrefix) < Long.parseLong(lowBoundMilliSecTime)) {
+            return false;
+        }
+        return true; // need to do additional checking on the sequence number in the equality case for next helper function
     }
     public void printTree(StreamNode node, String indent) {
         if (node == null) {
