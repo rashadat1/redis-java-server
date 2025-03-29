@@ -1,9 +1,9 @@
-import java.util.HashMap;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Stack;
 class StreamNode {
     String prefix;
-    HashMap<String,Object> data;
+    HashMap<String,String> data;
     HashMap<String,StreamNode> children;
     
     // constructor for intermediate nodes which do not store data (used for lookup)
@@ -12,7 +12,7 @@ class StreamNode {
         this.data = null;
         this.children = new HashMap<>();
     }
-    public StreamNode(String prefix, HashMap<String,Object> data) {
+    public StreamNode(String prefix, HashMap<String,String> data) {
         // constructor for terminal nodes - these do store data
         this(prefix); // call empty constructor to initialize children and prefi
         this.data = data;
@@ -99,7 +99,14 @@ public class Stream {
                 if (numCharConsumed == matchChildPrefixNode.prefix.length()) {
                     // either we are done or we need to move on based on our current position in the node to add
                     if (start == end) {
-                        // we reached the end of our insert id finding an exact match
+                        // we reached the last character and need to check if the last character is a match for an existing child 
+                        System.out.println("Id to insert: " + entry.prefix);
+                        String remaining = entry.prefix.substring(start);
+                        if (!curr.children.containsKey(remaining)) {
+                            StreamNode newNode = new StreamNode(remaining, entry.data);
+                            matchChildPrefixNode.children.put(remaining, newNode);
+                            this.lastID = entry.prefix;
+                        }
                         break;
                     } else {
                         // we have not finished processing the id to insert so proceed because we finished the prefix at the node that matches
@@ -122,9 +129,9 @@ public class Stream {
         return true;
 
     }
-    public ArrayList<StreamNode> findInRange(String startTime, String endTime) {
+    public ArrayList<NodeWithBuiltPrefix> findInRange(String startTime, String endTime) {
         // find and return a list of streamNodes with timestamps between start and end time
-        ArrayList<StreamNode> result = new ArrayList<>();
+        ArrayList<NodeWithBuiltPrefix> result = new ArrayList<>();
         Stack<NodeWithBuiltPrefix> stack = new Stack<>();
         NodeWithBuiltPrefix root_prefix = new NodeWithBuiltPrefix(this.root, this.root.prefix);
         stack.push(root_prefix);
@@ -142,7 +149,11 @@ public class Stream {
             }
             if (node.children.isEmpty()) {
                 if (this.withinRange(prefixBuiltSoFar, startTime, endTime)) {
-                    result.add(node);
+                    // we have reached a leaf node and the prefix up to sequence number is within within the range
+                    if (this.checkSeqNum(prefixBuiltSoFar, startTime, endTime)) {
+                        NodeWithBuiltPrefix inRangeNode = new NodeWithBuiltPrefix(node, prefixBuiltSoFar);
+                        result.add(inRangeNode);
+                    }
                 }
             }
         }
@@ -153,32 +164,46 @@ public class Stream {
         
 
     }
+    private boolean checkSeqNum(String prefix, String startTime, String endTime) {
+        String[] prefixParts = prefix.split("-");
+        String[] startTimeParts = startTime.split("-");
+        String[] endTimeParts = endTime.split("-");
+        String seqNum = (prefixParts.length == 2) ? prefixParts[1] : "0";
+        String startSeqNum = (startTimeParts.length == 2) ? startTimeParts[1] : "0";
+        String endSeqNum = (endTimeParts.length == 2) ? endTimeParts[1] : "0";
+
+        if (Long.parseLong(prefixParts[0]) == Long.parseLong(startTimeParts[0])) {
+            return (Long.parseLong(seqNum) >= Long.parseLong(startSeqNum));
+
+        } else if (Long.parseLong(prefixParts[0]) == Long.parseLong(endTimeParts[0])) {
+            return (Long.parseLong(seqNum) <= Long.parseLong(endSeqNum));
+        } else {
+            return true;
+        }
+    }
+
     private boolean withinRange(String prefix, String startTime, String endTime) {
         String[] prefixParts = prefix.split("-");
         // need to pad prefixParts[0] until its the same length as startTime / end Time
-        String startMilliSecTime = startTime.split("-")[0];
-        String endMilliSecTime = endTime.split("-")[0];
+        String[] startParts = startTime.split("-");
+        String[] endParts = endTime.split("-");
+        String startMilliSecTime = startParts[0];
+        String endMilliSecTime = endParts[0];
         int entryIdLength = startMilliSecTime.length();
 
-        if (entryIdLength != endTime.length()) {
+        if (entryIdLength != endMilliSecTime.length()) {
             System.out.println("Start and end times have different lengths");
         }
         // pad prefix so far so we can check to see if we are in bounds
         // we basically do a dfs and if a node's prefix so far exceeds the bounds then we end this exploration
+        System.out.println("Comparing " + prefix + " and start: " + startTime + " end: " + endTime);
         String paddedPrefix = String.format("%-" + entryIdLength + "s", prefixParts[0]).replace(" ", "0");
         boolean greaterThanStart = false;
         boolean lessThanEnd = false;
-        if (Long.parseLong(paddedPrefix) == Long.parseLong(startMilliSecTime)) {
-            greaterThanStart = (startTime.split("-").length == 2) ? (Long.parseLong(startTime.split("-")[1]) <= Long.parseLong(prefixParts[1])) : true;
-        } else {
-            greaterThanStart = Long.parseLong(paddedPrefix) > Long.parseLong(startMilliSecTime);
-        }
-        if (Long.parseLong(paddedPrefix) == Long.parseLong(endMilliSecTime)) {
-            lessThanEnd = (endTime.split("-").length == 2) ? (Long.parseLong(endTime.split("-")[1]) >= Long.parseLong(prefixParts[1])) : true;
-        } else {
-            lessThanEnd = Long.parseLong(paddedPrefix) < Long.parseLong(endMilliSecTime);
-        }
+        System.out.println("PaddedPrefix: " + paddedPrefix);
 
+        greaterThanStart = (Long.parseLong(paddedPrefix) >= Long.parseLong(startParts[0]));
+        lessThanEnd = (Long.parseLong(paddedPrefix) <= Long.parseLong(endParts[0]));
         return (greaterThanStart && lessThanEnd);
     }
     public void printTree(StreamNode node, String indent) {
@@ -217,6 +242,22 @@ public class Stream {
         stream.insertNewNode(node11);
         stream.insertNewNode(node12);
         stream.printTree(stream.root,"");
+
+        Stream stream2 = new Stream();
+        StreamNode node2_1 = new StreamNode("0-1");
+        StreamNode node2_2 = new StreamNode("0-2");
+        StreamNode node2_3 = new StreamNode("0-3");
+        StreamNode node2_4 = new StreamNode("0-4");
+
+        stream2.insertNewNode(node2_1);
+        stream2.printTree(stream2.root,"");
+        stream2.insertNewNode(node2_2);
+        stream2.printTree(stream2.root,"");
+        stream2.insertNewNode(node2_3);
+        stream2.printTree(stream2.root,"");
+        stream2.insertNewNode(node2_4);
+
+        stream2.printTree(stream2.root,"");
         System.out.println(stream.getClass());
         System.out.println(stream.getClass() == Stream.class);
     }
