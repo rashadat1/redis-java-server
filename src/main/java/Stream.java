@@ -1,4 +1,6 @@
 import java.util.HashMap;
+import java.util.ArrayList;
+import java.util.Stack;
 class StreamNode {
     String prefix;
     HashMap<String,Object> data;
@@ -36,7 +38,7 @@ public class Stream {
         intermediateNode.children.put(newNode.prefix, newNode);
         notInInsertNode.children = child.children;
 
-        this.lastID = newNode.prefix;
+        this.lastID = entry.prefix;
     }
     public void updateNode(StreamNode entry) {
     }
@@ -63,10 +65,17 @@ public class Stream {
         String[] lastIDParts = this.lastID.split("-");
         // check if entry.prefix is at least as large as the current lastID
         if (Long.parseLong(entryParts[0]) < Long.parseLong(lastIDParts[0])) {
+            System.out.println("Insertion failed because first part to enter is smaller");
+            System.out.println("EntryId: " + id);
+            System.out.println("LastID: " + lastID);
             return false;
         } else if (Long.parseLong(entryParts[0]) == Long.parseLong(lastIDParts[0])) {
             if (Long.parseLong(entryParts[1]) <= Long.parseLong(lastIDParts[1])) {
+                System.out.println("Failed because first parts to enter are the same size but second part of to enter is smaller");
+                System.out.println("EntryId: " + id);
+                System.out.println("LastID: " + lastID);
                 return false;
+
             }
         }
         if (curr.children.isEmpty()) {
@@ -112,6 +121,65 @@ public class Stream {
         }
         return true;
 
+    }
+    public ArrayList<StreamNode> findInRange(String startTime, String endTime) {
+        // find and return a list of streamNodes with timestamps between start and end time
+        ArrayList<StreamNode> result = new ArrayList<>();
+        Stack<NodeWithBuiltPrefix> stack = new Stack<>();
+        NodeWithBuiltPrefix root_prefix = new NodeWithBuiltPrefix(this.root, this.root.prefix);
+        stack.push(root_prefix);
+        while (!stack.isEmpty()) {
+            NodeWithBuiltPrefix node_prefix = stack.pop(); 
+            StreamNode node = node_prefix.node;
+            String prefixBuiltSoFar = node_prefix.prefixBuilt;
+            for (String child_prefix : node.children.keySet()) {
+                String prefixWithChild = prefixBuiltSoFar + child_prefix;
+                
+                if (this.withinRange(prefixWithChild, startTime, endTime)) {
+                    NodeWithBuiltPrefix prefixToAdd = new NodeWithBuiltPrefix(node.children.get(child_prefix), prefixWithChild);
+                    stack.push(prefixToAdd);
+                }
+            }
+            if (node.children.isEmpty()) {
+                if (this.withinRange(prefixBuiltSoFar, startTime, endTime)) {
+                    result.add(node);
+                }
+            }
+        }
+        return result;
+
+
+
+        
+
+    }
+    private boolean withinRange(String prefix, String startTime, String endTime) {
+        String[] prefixParts = prefix.split("-");
+        // need to pad prefixParts[0] until its the same length as startTime / end Time
+        String startMilliSecTime = startTime.split("-")[0];
+        String endMilliSecTime = endTime.split("-")[0];
+        int entryIdLength = startMilliSecTime.length();
+
+        if (entryIdLength != endTime.length()) {
+            System.out.println("Start and end times have different lengths");
+        }
+        // pad prefix so far so we can check to see if we are in bounds
+        // we basically do a dfs and if a node's prefix so far exceeds the bounds then we end this exploration
+        String paddedPrefix = String.format("%-" + entryIdLength + "s", prefixParts[0]).replace(" ", "0");
+        boolean greaterThanStart = false;
+        boolean lessThanEnd = false;
+        if (Long.parseLong(paddedPrefix) == Long.parseLong(startMilliSecTime)) {
+            greaterThanStart = (startTime.split("-").length == 2) ? (Long.parseLong(startTime.split("-")[1]) <= Long.parseLong(prefixParts[1])) : true;
+        } else {
+            greaterThanStart = Long.parseLong(paddedPrefix) > Long.parseLong(startMilliSecTime);
+        }
+        if (Long.parseLong(paddedPrefix) == Long.parseLong(endMilliSecTime)) {
+            lessThanEnd = (endTime.split("-").length == 2) ? (Long.parseLong(endTime.split("-")[1]) >= Long.parseLong(prefixParts[1])) : true;
+        } else {
+            lessThanEnd = Long.parseLong(paddedPrefix) < Long.parseLong(endMilliSecTime);
+        }
+
+        return (greaterThanStart && lessThanEnd);
     }
     public void printTree(StreamNode node, String indent) {
         if (node == null) {
