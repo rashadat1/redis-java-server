@@ -418,6 +418,7 @@ public class EventLoopServer {
                                             master_repl_offset += pingResponse.getBytes().length;
                                         }
 										break;
+
 									case "ECHO":
 										System.out.println("Echo Argument: " + parts[4]);
                                         String echoResponse = parts[3] + "\r\n" + parts[4] + "\r\n"; 
@@ -427,6 +428,7 @@ public class EventLoopServer {
                                             master_repl_offset += echoResponse.getBytes().length;
                                         }
 										break;
+
 									case "SET":
 										// Set command without PX
 										System.out.println("Set Command key: " + parts[4] + "\r\nSet Command value: " + parts[6]);
@@ -460,6 +462,7 @@ public class EventLoopServer {
 	                                        }
 	                                    }
 										break;
+
 									case "GET":
 										LocalDateTime expirationLocalDateTime = expiryTimes.get(parts[4]);
 										if (expirationLocalDateTime != null) {
@@ -484,6 +487,7 @@ public class EventLoopServer {
 										
 										channel.write(responseBuffer);
 										break;
+
 									case "CONFIG":
 										String commandStr = null;
 										String paramValue = null;
@@ -505,6 +509,7 @@ public class EventLoopServer {
 										channel.write(responseBuffer);
 										}
 										break;
+
 									case "KEYS":
                                         if (parts.length <= 4) {
                                             System.out.println("KEYS command received");
@@ -520,6 +525,7 @@ public class EventLoopServer {
                                         responseBuffer = ByteBuffer.wrap(KeysResponse.toString().getBytes());
                                         channel.write(responseBuffer);
                                         break;
+
 									case "INFO":
 										if (parts[4].equals("replication")) {
 											System.out.println("INFO Replication command received");
@@ -591,6 +597,7 @@ public class EventLoopServer {
                                             System.out.println("SOMETHING UNEXPECTED IS HAPPENING WITH REPLCONF");
                                         }
                                         break;
+
 	                                case "PSYNC":
 	                                    System.out.println("PSYNC command received");
                                         System.out.println("Resetting master_repl_offset to 0");
@@ -615,6 +622,7 @@ public class EventLoopServer {
                                         System.out.println("Replica registered with selector for OP_READ: " + channel.getRemoteAddress());
                                     	replicaSocketList.add(channel);
 	                                    break;
+
                                     case "WAIT":
                                         System.out.println("WAIT command received");
                                         System.out.println("There are " + replicaSocketList.size() + " total replicas");
@@ -643,6 +651,7 @@ public class EventLoopServer {
                                         parsedREPLACK = 0;
                                         // break so we do not block here - we want the main loop to continue execution
                                         break;
+
                                     case "TYPE":
                                         System.out.println("TYPE command received");
                                         String keyToFind = parts[4];
@@ -662,6 +671,7 @@ public class EventLoopServer {
                                         System.out.println("Sending the following response: " + typeResponseString);
                                         channel.write(ByteBuffer.wrap(typeResponseString.getBytes()));
                                         break;
+
                                     case "XADD":
                                         System.out.println("XADD command received");
                                         String streamName = parts[4];
@@ -740,6 +750,7 @@ public class EventLoopServer {
                                         System.out.println("Sending XADD Response: " + xaddResponse.toString());
                                         channel.write(ByteBuffer.wrap(xaddResponse.toString().getBytes()));
                                         break;
+
                                     case "XRANGE":
                                         System.out.println("Received XRANGE Command");
                                         String range_start = parts[6];
@@ -787,13 +798,47 @@ public class EventLoopServer {
                                         System.out.println(xrangeResponse);
                                         channel.write(ByteBuffer.wrap(xrangeResponse.toString().getBytes())); 
                                         break;
+
                                     case "XREAD":
                                         System.out.println("XREAD command received");
+                                        int numPartsContent = Integer.parseInt(parts[0].replace("*","")) - 2; // subtract the parts corresponding to xread and streams
+                                        int numStreamsQuery = numPartsContent / 2;
                                         ArrayList<String> xreadStreamNames = new ArrayList<>();
-                                        for (int i = 6; i < parts.length - 2; i += 2) {
+                                        ArrayList<String> lowBounds = new ArrayList<>();
+                                        for (int i = 6; i <= parts.length - (2 * numStreamsQuery); i += 2) {
                                             xreadStreamNames.add(parts[i]);
+                                            lowBounds.add(parts[i + (2 * numStreamsQuery)]);
                                         }
-                                        String lowBound = parts[parts.length - 1];
+                                        System.out.println("Streams to XREAD: " + xreadStreamNames);
+                                        System.out.println("LowerBounds to process: " + lowBounds);
+                                        StringBuilder xreadResponse = new StringBuilder("*").append(xreadStreamNames.size()).append("\r\n");
+                                        
+                                        for (int i = 0; i < xreadStreamNames.size(); i++) {
+                                            Stream xreadStream = streamMap.get(xreadStreamNames.get(i));
+                                            // for each stream we are reading from - we perform xread to find nodes above the lowBound
+                                            ArrayList<NodeWithBuiltPrefix> xreadRetrievedNodes = xreadStream.readAboveBound(lowBounds.get(i));
+                                            xreadResponse.append("*2\r\n");
+                                            xreadResponse.append("$").append(xreadStreamNames.get(i).length()).append("\r\n").append(xreadStreamNames.get(i)).append("\r\n");
+                                            xreadResponse.append("*").append(xreadRetrievedNodes.size()).append("\r\n");
+                                            xreadResponse.append("*2\r\n");
+                                            for (NodeWithBuiltPrefix xreadRetrievedNode : xreadRetrievedNodes) {
+                                                String streamIdRetrieved = xreadRetrievedNode.node.prefix;  
+                                                HashMap<String,String> dataInNode = xreadRetrievedNode.node.data;
+                                                
+                                                xreadResponse.append("$").append(streamIdRetrieved.length()).append("\r\n").append(streamIdRetrieved).append("\r\n");
+                                                int numKeyVals = 2 * dataInNode.size();
+                                                xreadResponse.append("*").append(numKeyVals).append("\r\n");
+                                                for (String nodeKey : dataInNode.keySet()) {
+                                                    String nodeValFromKey = dataInNode.get(nodeKey);
+                                                    xreadResponse.append("$").append(nodeKey.length()).append("\r\n").append(nodeKey).append("\r\n");
+                                                    xreadResponse.append("$").append(nodeValFromKey.length()).append("\r\n").append(nodeValFromKey).append("\r\n");
+                                                } 
+                                            }
+                                        }
+                                        System.out.println("xreadResponse:");
+                                        System.out.println(xreadResponse);
+                                        channel.write(ByteBuffer.wrap(xreadResponse.toString().getBytes()));
+                                        break;
                                         
 									default: 
 					    				break;

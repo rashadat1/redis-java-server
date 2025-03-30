@@ -181,6 +181,22 @@ public class Stream {
             for (String child_prefix : node.children.keySet()) {
                 String prefixWithChild = prefixBuiltSoFar + child_prefix;
 
+                if (this.xreadHelper(prefixWithChild, lowBound)) {
+                    // then the milliseconds part is not below the bound for this branch
+                    NodeWithBuiltPrefix prefixToAdd = new NodeWithBuiltPrefix(node.children.get(child_prefix), prefixWithChild);
+                    stack.push(prefixToAdd);
+                }
+            }
+            if (node.children.isEmpty()) {
+                // check to see if we have reached a leaf node
+                if (this.xreadHelper(prefixBuiltSoFar, lowBound)) {
+                    // we have reached a leaf node and the prefix up to sequence number is not below the lower bound
+                    // need to confirm that, if the milliseconds part matches that the lowBound sequence number is smaller
+                    if (this.xreadSeqNumHelper(prefixBuiltSoFar, lowBound)) {
+                        NodeWithBuiltPrefix xreadNode = new NodeWithBuiltPrefix(node, prefixBuiltSoFar);
+                        result.add(xreadNode);
+                    }
+                }
             }
         }
         return result;
@@ -238,6 +254,21 @@ public class Stream {
             return false;
         }
         return true; // need to do additional checking on the sequence number in the equality case for next helper function
+    }
+    private boolean xreadSeqNumHelper(String prefix, String lowBound) {
+        String[] prefixParts = prefix.split("-");
+        String[] lowBoundParts = lowBound.split("-");
+        String prefixSeqNum = (prefixParts.length == 2) ? prefixParts[1] : "0";
+        String lowBoundSeqNum = (lowBoundParts.length == 2) ? lowBoundParts[1] : "0";
+
+        if (Long.parseLong(prefixParts[0]) == Long.parseLong(lowBoundParts[0])) {
+            return (Long.parseLong(prefixSeqNum) > Long.parseLong(lowBoundSeqNum));
+        }
+        if (Long.parseLong(prefixParts[0]) > Long.parseLong(lowBoundParts[0])) {
+            return true;
+        }
+        return false;
+
     }
     public void printTree(StreamNode node, String indent) {
         if (node == null) {
