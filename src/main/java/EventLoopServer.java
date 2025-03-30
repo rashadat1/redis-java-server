@@ -1,4 +1,5 @@
 import java.io.IOException;
+import java.util.stream.Collectors;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -38,6 +39,7 @@ public class EventLoopServer {
     private static int acknowledgedReplicas = 0;
     private static int writeOffset = 0;
     private static WaitRequest waitRequest = null;
+    private static ArrayList<XReadBlock> listBlockingXReads = new ArrayList<>();
     private static int parsedREPLACK = 0;
     final static HashMap<String, Stream> streamMap = new HashMap<>();
 	private static void loadRDBFile() throws IOException {
@@ -801,45 +803,76 @@ public class EventLoopServer {
 
                                     case "XREAD":
                                         System.out.println("XREAD command received");
-                                        int numPartsContent = Integer.parseInt(parts[0].replace("*","")) - 2; // subtract the parts corresponding to xread and streams
+                                        boolean blockingXread = (parts[4].equalsIgnoreCase("block"));
+                                        int blockParserOffset = blockingXread ? 4 : 0;
+                                        int numPartsContent = Integer.parseInt(parts[0].replace("*","")) - 2; // subtract the parts corresponding to xread and streams and blocking 
+                                        if (blockingXread) {
+                                            System.out.println("XREAD command is blocking with wait time: " + parts[6]);
+                                            numPartsContent -= 2;
+                                        }
                                         int numStreamsQuery = numPartsContent / 2;
                                         ArrayList<String> xreadStreamNames = new ArrayList<>();
                                         ArrayList<String> lowBounds = new ArrayList<>();
-                                        for (int i = 6; i <= parts.length - (2 * numStreamsQuery); i += 2) {
+                                        for (int i = 6 + blockParserOffset; i <= parts.length - (2 * numStreamsQuery); i += 2) {
                                             xreadStreamNames.add(parts[i]);
                                             lowBounds.add(parts[i + (2 * numStreamsQuery)]);
                                         }
                                         System.out.println("Streams to XREAD: " + xreadStreamNames);
                                         System.out.println("LowerBounds to process: " + lowBounds);
+                            
                                         StringBuilder xreadResponse = new StringBuilder("*").append(xreadStreamNames.size()).append("\r\n");
-                                        
+                                        ArrayList<NodeWithBuiltPrefix> xreadRetrievedNodes = new ArrayList<>();
+                                        // count number of streams specified in the xread that actually contain data for the low Bound id
+                                        int numNodesWithDataRead = 0;
                                         for (int i = 0; i < xreadStreamNames.size(); i++) {
                                             Stream xreadStream = streamMap.get(xreadStreamNames.get(i));
                                             // for each stream we are reading from - we perform xread to find nodes above the lowBound
-                                            ArrayList<NodeWithBuiltPrefix> xreadRetrievedNodes = xreadStream.readAboveBound(lowBounds.get(i));
-                                            xreadResponse.append("*2\r\n");
-                                            xreadResponse.append("$").append(xreadStreamNames.get(i).length()).append("\r\n").append(xreadStreamNames.get(i)).append("\r\n");
-                                            xreadResponse.append("*").append(xreadRetrievedNodes.size()).append("\r\n");
-                                            xreadResponse.append("*2\r\n");
-                                            for (NodeWithBuiltPrefix xreadRetrievedNode : xreadRetrievedNodes) {
-                                                String streamIdRetrieved = xreadRetrievedNode.node.prefix;  
-                                                HashMap<String,String> dataInNode = xreadRetrievedNode.node.data;
-                                                
-                                                xreadResponse.append("$").append(streamIdRetrieved.length()).append("\r\n").append(streamIdRetrieved).append("\r\n");
-                                                int numKeyVals = 2 * dataInNode.size();
-                                                xreadResponse.append("*").append(numKeyVals).append("\r\n");
-                                                for (String nodeKey : dataInNode.keySet()) {
-                                                    String nodeValFromKey = dataInNode.get(nodeKey);
-                                                    xreadResponse.append("$").append(nodeKey.length()).append("\r\n").append(nodeKey).append("\r\n");
-                                                    xreadResponse.append("$").append(nodeValFromKey.length()).append("\r\n").append(nodeValFromKey).append("\r\n");
-                                                } 
+                                            xreadRetrievedNodes = xreadStream.readAboveBound(lowBounds.get(i));
+                                            if (!xreadRetrievedNodes.isEmpty()) {
+                                                numNodesWithDataRead += 1;
+                                                xreadResponse.append("*2\r\n");
+                                                xreadResponse.append("$").append(xreadStreamNames.get(i).length()).append("\r\n").append(xreadStreamNames.get(i)).append("\r\n");
+                                                xreadResponse.append("*").append(xreadRetrievedNodes.size()).append("\r\n");
+                                                xreadResponse.append("*2\r\n");
+                                                for (NodeWithBuiltPrefix xreadRetrievedNode : xreadRetrievedNodes) {
+                                                    String streamIdRetrieved = xreadRetrievedNode.node.prefix;  
+                                                    HashMap<String,String> dataInNode = xreadRetrievedNode.node.data;
+                                                    
+                                                    xreadResponse.append("$").append(streamIdRetrieved.length()).append("\r\n").append(streamIdRetrieved).append("\r\n");
+                                                    int numKeyVals = 2 * dataInNode.size();
+                                                    xreadResponse.append("*").append(numKeyVals).append("\r\n");
+                                                    for (String nodeKey : dataInNode.keySet()) {
+                                                        String nodeValFromKey = dataInNode.get(nodeKey);
+                                                        xreadResponse.append("$").append(nodeKey.length()).append("\r\n").append(nodeKey).append("\r\n");
+                                                        xreadResponse.append("$").append(nodeValFromKey.length()).append("\r\n").append(nodeValFromKey).append("\r\n");
+                                                    } 
+                                                }
                                             }
                                         }
-                                        System.out.println("xreadResponse:");
-                                        System.out.println(xreadResponse);
-                                        channel.write(ByteBuffer.wrap(xreadResponse.toString().getBytes()));
-                                        break;
-                                        
+                                        if (numNodesWithDataRead > 0) {
+                                            // whether we have a blocking xread or not - if there are results of the search - return immediately
+                                            System.out.println("xreadResponse:");
+                                            System.out.println(xreadResponse);
+                                            channel.write(ByteBuffer.wrap(xreadResponse.toString().getBytes()));
+                                            break;
+                                        } else {
+                                            if (blockingXread) {
+                                                // only create and register the blocking object if there were no results and the XREAD is blocking
+                                                List<Stream> Streams = xreadStreamNames.stream()
+                                                    .map(streamMap::get)
+                                                    .collect(Collectors.toList());
+
+                                                Long xReadExpiry = System.currentTimeMillis() + Long.parseLong(parts[6]);
+                                                XReadBlock xreadBlockObject = new XReadBlock(new ArrayList<>(Streams), channel, lowBounds, xReadExpiry);
+                                                listBlockingXReads.add(xreadBlockObject);
+                                                System.out.println("Registered block xread object with expiry: " + xReadExpiry);
+                                                break;
+                                            } else {
+                                                // no results and not a blockingXread
+                                                channel.write(ByteBuffer.wrap("$-1\r\n".getBytes()));
+                                                break;
+                                            }
+                                        }
 									default: 
 					    				break;
 
