@@ -1,5 +1,4 @@
 import java.io.IOException;
-import java.util.stream.Collectors;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -20,6 +19,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.stream.Collectors;
 // Build Redis
 public class EventLoopServer {
 	
@@ -242,6 +242,42 @@ public class EventLoopServer {
 			}
 		}
     }
+    public static StringBuilder xreadProcessor(ArrayList<String> xreadStreamNames, ArrayList<String> lowBounds) {
+        // preappend to result - StringBuilder xreadResponse = new StringBuilder("*").append(xreadStreamNames.size()).append("\r\n");
+        StringBuilder xreadResponse = new StringBuilder(); 
+        ArrayList<NodeWithBuiltPrefix> xreadRetrievedNodes = new ArrayList<>();
+        int numNodesWithDataRead = 0;
+        for (int i = 0; i < xreadStreamNames.size(); i++) {
+            Stream xreadStream = streamMap.get(xreadStreamNames.get(i));
+            // for each stream we are reading from - we perform xread to find nodes above the lowBound 
+            xreadRetrievedNodes = xreadStream.readAboveBound(lowBounds.get(i));
+            if (!xreadRetrievedNodes.isEmpty()) {
+                numNodesWithDataRead += 1;
+                xreadResponse.append("*2\r\n");
+                xreadResponse.append("$").append(xreadStreamNames.get(i).length()).append("\r\n").append(xreadStreamNames.get(i)).append("\r\n");
+                xreadResponse.append("*").append(xreadRetrievedNodes.size()).append("\r\n");
+                xreadResponse.append("*2\r\n");
+                for (NodeWithBuiltPrefix xreadRetrievedNode : xreadRetrievedNodes) {
+                    String streamIdRetrieved = xreadRetrievedNode.node.prefix;
+                    HashMap<String, String> dataInNode = xreadRetrievedNode.node.data;
+                    
+                    xreadResponse.append("$").append(streamIdRetrieved.length()).append("\r\n").append(streamIdRetrieved).append("\r\n");
+                    int numKeyVals = 2 * dataInNode.size();
+                    xreadResponse.append("*").append(numKeyVals).append("\r\n");
+                    for (String nodeKey : dataInNode.keySet()) {
+                        String nodeValFromKey = dataInNode.get(nodeKey);
+                        xreadResponse.append("$").append(nodeKey.length()).append("\r\n").append(nodeKey).append("\r\n");
+                        xreadResponse.append("$").append(nodeValFromKey.length()).append("\r\n").append(nodeValFromKey).append("\r\n");
+                    }
+                }
+            }
+        }
+        if (numNodesWithDataRead > 0) {
+            return xreadResponse;
+        } else {
+            return new StringBuilder("-1\r\n");
+        }
+    }
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			parseArgs(args);
@@ -331,10 +367,11 @@ public class EventLoopServer {
 			while (true) {
                 long currentTime = System.currentTimeMillis();
                 long blockTime = 0;
+                ArrayList<Long> xReadBlockTime = new ArrayList<>();
                 if (waitRequest != null) {
                     // check if we are processing a wait command - if so we should check to see if the timeout has been reached
-                    blockTime = waitRequest.timeOut - System.currentTimeMillis();
-                    if (currentTime >= waitRequest.timeOut) {
+                    blockTime = waitRequest.timeOut - currentTime;
+                    if (blockTime <= 0) {
                         System.out.println("Wait request time out reached");
                         ByteBuffer waitResponseBuffer = ByteBuffer.wrap((":" + acknowledgedReplicas + "\r\n").getBytes());
                         waitRequest.channel.write(waitResponseBuffer);
@@ -347,8 +384,25 @@ public class EventLoopServer {
                     }
 
                 }
+                List<XReadBlock> toRemove = new ArrayList<>();
+                if (listBlockingXReads.size() != 0) {
+                    // check if we have any blocking xreads in waiting
+                    for (XReadBlock xreadblock : listBlockingXReads) {
+                        // for each of these blocking xreads add the remaining blocking time to an array of longs 
+                        xReadBlockTime.add(xreadblock.expiry - currentTime);
+                        if (currentTime >= xreadblock.expiry) {
+                            // and check if we have passed the time 
+                            System.out.println("XREAD time out reached for xread waiting on streams: " + xreadblock.streamsWaitingOn + " with expiry " + xreadblock.expiry);
+                            toRemove.add(xreadblock); 
+                            // need to refactor the signature for xreadProcessor or I need to refactor the type definition for XReadBlock to use Stream Names (Strings)
+                        }
+                    }
+                    listBlockingXReads.removeAll(toRemove);
+                    break;
+                }
+                long largestXreadTimeout = Collections.max(xReadBlockTime);
 				// Select ready channels using the selector
-				selector.select(Math.max(blockTime, 0)); // if we have passed the timeOut deadline then continue as normal
+				selector.select(Math.max(Math.max(blockTime, 0), largestXreadTimeout)); // if we have passed the timeOut deadline then continue as normal
 				// Get the set of selected keys corresponding to ready channels
 				Set<SelectionKey> selectedKeys = selector.selectedKeys();
 				// create an iterator object to iterate through the selectedKeys
@@ -811,7 +865,7 @@ public class EventLoopServer {
                                             numPartsContent -= 2;
                                         }
                                         int numStreamsQuery = numPartsContent / 2;
-                                        ArrayList<String> xreadStreamNames = new ArrayList<>();
+                                        ArrayList<String> xreadStreamNames= new ArrayList<>();
                                         ArrayList<String> lowBounds = new ArrayList<>();
                                         for (int i = 6 + blockParserOffset; i <= parts.length - (2 * numStreamsQuery); i += 2) {
                                             xreadStreamNames.add(parts[i]);
@@ -819,49 +873,19 @@ public class EventLoopServer {
                                         }
                                         System.out.println("Streams to XREAD: " + xreadStreamNames);
                                         System.out.println("LowerBounds to process: " + lowBounds);
-                            
-                                        StringBuilder xreadResponse = new StringBuilder("*").append(xreadStreamNames.size()).append("\r\n");
-                                        ArrayList<NodeWithBuiltPrefix> xreadRetrievedNodes = new ArrayList<>();
-                                        // count number of streams specified in the xread that actually contain data for the low Bound id
-                                        int numNodesWithDataRead = 0;
-                                        for (int i = 0; i < xreadStreamNames.size(); i++) {
-                                            Stream xreadStream = streamMap.get(xreadStreamNames.get(i));
-                                            // for each stream we are reading from - we perform xread to find nodes above the lowBound
-                                            xreadRetrievedNodes = xreadStream.readAboveBound(lowBounds.get(i));
-                                            if (!xreadRetrievedNodes.isEmpty()) {
-                                                numNodesWithDataRead += 1;
-                                                xreadResponse.append("*2\r\n");
-                                                xreadResponse.append("$").append(xreadStreamNames.get(i).length()).append("\r\n").append(xreadStreamNames.get(i)).append("\r\n");
-                                                xreadResponse.append("*").append(xreadRetrievedNodes.size()).append("\r\n");
-                                                xreadResponse.append("*2\r\n");
-                                                for (NodeWithBuiltPrefix xreadRetrievedNode : xreadRetrievedNodes) {
-                                                    String streamIdRetrieved = xreadRetrievedNode.node.prefix;  
-                                                    HashMap<String,String> dataInNode = xreadRetrievedNode.node.data;
-                                                    
-                                                    xreadResponse.append("$").append(streamIdRetrieved.length()).append("\r\n").append(streamIdRetrieved).append("\r\n");
-                                                    int numKeyVals = 2 * dataInNode.size();
-                                                    xreadResponse.append("*").append(numKeyVals).append("\r\n");
-                                                    for (String nodeKey : dataInNode.keySet()) {
-                                                        String nodeValFromKey = dataInNode.get(nodeKey);
-                                                        xreadResponse.append("$").append(nodeKey.length()).append("\r\n").append(nodeKey).append("\r\n");
-                                                        xreadResponse.append("$").append(nodeValFromKey.length()).append("\r\n").append(nodeValFromKey).append("\r\n");
-                                                    } 
-                                                }
-                                            }
-                                        }
-                                        if (numNodesWithDataRead > 0) {
-                                            // whether we have a blocking xread or not - if there are results of the search - return immediately
+                                         
+                                        StringBuilder xreadResponse = new StringBuilder("*").append(xreadStreamNames.size()).append("\r\n");                                
+                                        StringBuilder xreadProcessorResult = xreadProcessor(xreadStreamNames, lowBounds);
+                                        if (!xreadProcessorResult.toString().equals("-1\r\n")) {
                                             System.out.println("xreadResponse:");
-                                            System.out.println(xreadResponse);
-                                            channel.write(ByteBuffer.wrap(xreadResponse.toString().getBytes()));
+                                            System.out.println(xreadProcessorResult);
+                                            channel.write(ByteBuffer.wrap((xreadResponse.toString() + xreadProcessorResult.toString()).getBytes()));
                                             break;
                                         } else {
                                             if (blockingXread) {
-                                                // only create and register the blocking object if there were no results and the XREAD is blocking
                                                 List<Stream> Streams = xreadStreamNames.stream()
                                                     .map(streamMap::get)
                                                     .collect(Collectors.toList());
-
                                                 Long xReadExpiry = System.currentTimeMillis() + Long.parseLong(parts[6]);
                                                 XReadBlock xreadBlockObject = new XReadBlock(new ArrayList<>(Streams), channel, lowBounds, xReadExpiry);
                                                 listBlockingXReads.add(xreadBlockObject);
@@ -869,7 +893,7 @@ public class EventLoopServer {
                                                 break;
                                             } else {
                                                 // no results and not a blockingXread
-                                                channel.write(ByteBuffer.wrap("$-1\r\n".getBytes()));
+                                                channel.write(ByteBuffer.wrap(xreadProcessorResult.toString().getBytes()));
                                                 break;
                                             }
                                         }
