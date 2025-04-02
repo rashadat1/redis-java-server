@@ -24,7 +24,7 @@ import java.util.stream.Collectors;
 public class EventLoopServer {
 	
 	private static int port = 6379;
-	public static Map<String, Object> data = new ConcurrentHashMap<>();
+	public static Map<String, String> data = new ConcurrentHashMap<>();
 	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
 	private static String dbfilename = null;
@@ -963,6 +963,27 @@ public class EventLoopServer {
                                                 break;
                                             }
                                         }
+                                    case "INCR":
+                                        // increment the value associated with the received key by 1 
+                                        // if the key does not exist in the hashmap - we set the value to 1
+                                        System.out.println("INCR command received");
+                                        String keyToIncr = parts[4];
+                                        String valToIncr = data.getOrDefault(keyToIncr, "0");
+                                        try {
+                                            String newVal = String.valueOf(Long.parseLong(valToIncr) + 1);
+                                            data.put(keyToIncr, newVal);
+                                            
+                                            StringBuilder incrResponse = new StringBuilder(":");
+                                            incrResponse.append(newVal).append("\r\n");
+                                            channel.write(ByteBuffer.wrap(incrResponse.toString().getBytes()));
+                                            break;
+                                        } catch (NumberFormatException e) {
+                                            // if the value to increment is non-numeric we should return an Error
+                                            channel.write(ByteBuffer.wrap("-ERR value is not an integer or out of range\r\n".getBytes()));
+                                            break;
+                                        }
+                                
+
 									default: 
 					    				break;
 
