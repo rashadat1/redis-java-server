@@ -9,7 +9,6 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Instant;
-import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -25,7 +24,7 @@ public class EventLoopServer {
 	
 	private static int port = 6379;
 	public static Map<String, String> data = new ConcurrentHashMap<>();
-	public static Map<String, LocalDateTime> expiryTimes = new ConcurrentHashMap<>();
+	public static Map<String, Instant> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
 	private static String dbfilename = null;
 	private static boolean isreplica = false;
@@ -98,7 +97,7 @@ public class EventLoopServer {
 				
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
-				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTime, 0, java.time.ZoneOffset.UTC);
+				Instant expirationTime = Instant.ofEpochSecond(expiryTime);
 				
 				System.out.println("Loaded Key: " + key + " Value: " + value + " Expiry: " + expirationTime);
 
@@ -114,7 +113,7 @@ public class EventLoopServer {
 				String key = readString(fileBuffer);
 				String value = readString(fileBuffer);
 				// convert ms to seconds then pass remainder in nanoseconds as second argument   
-				LocalDateTime expirationTime = LocalDateTime.ofEpochSecond(expiryTimeMillis / 1000, (int) (expiryTimeMillis % 1000) * 1_000_000, java.time.ZoneOffset.UTC);
+				Instant expirationTime = Instant.ofEpochMilli(expiryTimeMillis);
 				
 				System.out.println("Loaded Key: " + key + " Value: " + value + " Expiry: " + expirationTime);
 
@@ -283,7 +282,6 @@ public class EventLoopServer {
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			parseArgs(args);
-			
 			// create Selector for channel monitoring  
 			Selector selector = Selector.open();
 			// create a non-blocking server socket channel
@@ -522,7 +520,7 @@ public class EventLoopServer {
 												data.put(parts[4],  parts[6]);
 											}
 											long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
-											LocalDateTime expiryTime = LocalDateTime.now().plusNanos(expiryMillis);
+											Instant expiryTime = Instant.now().plusNanos(expiryMillis);
 											expiryTimes.put(parts[4], expiryTime); // store the expiration time
 											responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
 										}
@@ -540,12 +538,11 @@ public class EventLoopServer {
 										break;
 
 									case "GET":
-										LocalDateTime expirationLocalDateTime = expiryTimes.get(parts[4]);
-										if (expirationLocalDateTime != null) {
-											Instant expirationTime = expirationLocalDateTime.toInstant(java.time.ZoneOffset.UTC);
-											System.out.println("Expiration Time for key '" + parts[4] + "': " + expirationTime);
+										Instant expirationInstant = expiryTimes.get(parts[4]);
+										if (expirationInstant != null) {
+											System.out.println("Expiration Time for key '" + parts[4] + "': " + expirationInstant);
 											System.out.println("Current Time: " + Instant.now());
-											if (Instant.now().isAfter(expirationTime)) {
+											if (Instant.now().isAfter(expirationInstant)) {
 												// the case where the access occurs after the expiration
 												responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
 									            System.out.println("Key '" + parts[4] + "' has expired. Response Sent: $-1");
