@@ -1,6 +1,6 @@
 import java.util.concurrent.ConcurrentHashMap;
 
-public class IncrCommand extends RedisCommand {
+public class IncrCommand implements RedisCommand {
     String keyToIncr;
     ConcurrentHashMap<String, String> db;
 

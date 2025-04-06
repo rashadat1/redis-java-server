@@ -1,6 +1,3 @@
-abstract public class RedisCommand {
-
-    public RedisCommand() {}
-
-    abstract StringBuilder processCommand();
+public interface RedisCommand {
+    StringBuilder processCommand();
 }

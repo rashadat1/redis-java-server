@@ -1,7 +1,7 @@
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class GetCommand extends RedisCommand {
+public class GetCommand implements RedisCommand {
     String key;
     ConcurrentHashMap<String, String> db;
     ConcurrentHashMap<String, Instant> expiryTimes;

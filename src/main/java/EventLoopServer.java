@@ -9,12 +9,13 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.time.Instant;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -23,8 +24,8 @@ import java.util.stream.Collectors;
 public class EventLoopServer {
 	
 	private static int port = 6379;
-	public static Map<String, String> data = new ConcurrentHashMap<>();
-	public static Map<String, Instant> expiryTimes = new ConcurrentHashMap<>();
+	public static ConcurrentHashMap<String, String> data = new ConcurrentHashMap<>();
+	public static ConcurrentHashMap<String, Instant> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
 	private static String dbfilename = null;
 	private static boolean isreplica = false;
@@ -40,6 +41,8 @@ public class EventLoopServer {
     private static WaitRequest waitRequest = null;
     private static ArrayList<XReadBlock> listBlockingXReads = new ArrayList<>();
     private static ArrayList<XReadBlock> listNoTimeoutXReads = new ArrayList<>();
+    private static HashMap<SocketChannel, Queue<RedisCommand>> pendingTransactionQueues = new HashMap<>();
+
     private static int parsedREPLACK = 0;
     final static HashMap<String, Stream> streamMap = new HashMap<>();
 	private static void loadRDBFile() throws IOException {
@@ -242,43 +245,6 @@ public class EventLoopServer {
 			}
 		}
     }
-    public static xReadProcessorReturnType xreadProcessor(ArrayList<String> xreadStreamNames, ArrayList<String> lowBounds) {
-        // preappend to result - StringBuilder xreadResponse = new StringBuilder("*").append(xreadStreamNames.size()).append("\r\n");
-        StringBuilder xreadResponse = new StringBuilder(); 
-        ArrayList<NodeWithBuiltPrefix> xreadRetrievedNodes = new ArrayList<>();
-        int numNodesWithDataRead = 0;
-        for (int i = 0; i < xreadStreamNames.size(); i++) {
-            Stream xreadStream = streamMap.get(xreadStreamNames.get(i));
-            // for each stream we are reading from - we perform xread to find nodes above the lowBound 
-            xreadRetrievedNodes = xreadStream.readAboveBound(lowBounds.get(i));
-            if (!xreadRetrievedNodes.isEmpty()) {
-                numNodesWithDataRead += 1;
-                xreadResponse.append("*2\r\n");
-                xreadResponse.append("$").append(xreadStreamNames.get(i).length()).append("\r\n").append(xreadStreamNames.get(i)).append("\r\n");
-                xreadResponse.append("*").append(xreadRetrievedNodes.size()).append("\r\n");
-                xreadResponse.append("*2\r\n");
-                for (NodeWithBuiltPrefix xreadRetrievedNode : xreadRetrievedNodes) {
-                    String streamIdRetrieved = xreadRetrievedNode.prefixBuilt;
-                    HashMap<String, String> dataInNode = xreadRetrievedNode.node.data;
-                    
-                    xreadResponse.append("$").append(streamIdRetrieved.length()).append("\r\n").append(streamIdRetrieved).append("\r\n");
-                    int numKeyVals = 2 * dataInNode.size();
-                    xreadResponse.append("*").append(numKeyVals).append("\r\n");
-                    for (String nodeKey : dataInNode.keySet()) {
-                        String nodeValFromKey = dataInNode.get(nodeKey);
-                        xreadResponse.append("$").append(nodeKey.length()).append("\r\n").append(nodeKey).append("\r\n");
-                        xreadResponse.append("$").append(nodeValFromKey.length()).append("\r\n").append(nodeValFromKey).append("\r\n");
-                    }
-                }
-            }
-        }
-        if (numNodesWithDataRead > 0) {
-            xReadProcessorReturnType returnObject = new xReadProcessorReturnType(xreadResponse, numNodesWithDataRead);
-            return returnObject;
-        } else {
-            return new xReadProcessorReturnType(new StringBuilder("$-1\r\n"), 0);
-        }
-    }
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			parseArgs(args);
@@ -395,18 +361,21 @@ public class EventLoopServer {
                             // and check if we have passed the time 
                             System.out.println("Found expired blocking Xread!");
                             System.out.println("XREAD time out reached for xread waiting on streams: " + xreadblock.streamsWaitingOn + " with expiry " + xreadblock.expiry);
-                            toRemove.add(xreadblock); 
-                            xReadProcessorReturnType xreadResult = xreadProcessor(xreadblock.streamsWaitingOn, xreadblock.lowBoundId);
-                            System.out.println("The result of the blocked xread is: " + xreadResult.xReadResponse.toString());
-                            if (xreadResult.xReadResponse.toString().equals("$-1\r\n")) {
+                            toRemove.add(xreadblock);
+
+                            XreadCommand xreadCommand = new XreadCommand(null, streamMap, xreadblock.streamsWaitingOn, xreadblock.lowBoundId, 0, false);
+                            StringBuilder xreadResult = xreadCommand.processCommand();
+
+                            System.out.println("The result of the blocked xread is: " + xreadResult.toString());
+                            if (xreadResult.toString().equals("$-1\r\n")) {
                                 // no xadd occurred in streams waiting on so send bulk empty string 
-                                xreadblock.channel.write(ByteBuffer.wrap(xreadResult.xReadResponse.toString().getBytes()));
+                                xreadblock.channel.write(ByteBuffer.wrap(xreadResult.toString().getBytes()));
                             } else {
                                 // xadd did occur in streams waiting!
                                 System.out.println("xaddds occurred while channels blocked!");
-                                System.out.println(xreadResult.xReadResponse);
-                                StringBuilder starter = new StringBuilder("*").append(xreadResult.numStreamsWrittenTo).append("\r\n");
-                                xreadblock.channel.write(ByteBuffer.wrap((starter.toString() + xreadResult.xReadResponse.toString()).getBytes()));
+                                System.out.println(xreadResult);
+                                StringBuilder starter = new StringBuilder("*").append(xreadCommand.numNodesWithDataRead).append("\r\n");
+                                xreadblock.channel.write(ByteBuffer.wrap((starter.toString() + xreadResult.toString()).getBytes()));
                             }
                         }
                     }
@@ -504,31 +473,30 @@ public class EventLoopServer {
 										break;
 
 									case "SET":
-										// Set command without PX
 										System.out.println("Set Command key: " + parts[4] + "\r\nSet Command value: " + parts[6]);
-										if (parts.length == 7) {
-											if (!parts[4].isEmpty()) {
-												data.put(parts[4], parts[6]);
-											}
-	                                         
-											responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-											expiryTimes.remove(parts[4]); // remove any existing expiration for this key
-											
-										} else if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
-											// Set command with PX to set expiration
-											if (!parts[4].isEmpty()) {
-												data.put(parts[4],  parts[6]);
-											}
-											long expiryMillis = 1_000_000 * Long.parseLong(parts[10]);
-											Instant expiryTime = Instant.now().plusNanos(expiryMillis);
-											expiryTimes.put(parts[4], expiryTime); // store the expiration time
-											responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-										}
+                                        SetCommand setCommand; 
+                                        if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
+                                            // set command with expiration
+                                            System.out.println("Creating set Command object with expiry"); 
+                                            setCommand = new SetCommand(parts[4], parts[6], parts[10], data, expiryTimes);
+                                        } else {
+                                            // set command without expiration
+                                            System.out.println("Creating set Command object without expiry"); 
+                                            setCommand = new SetCommand(parts[4], parts[6], "none", data, expiryTimes);
+                                        }
+                                        StringBuilder setResponse = new StringBuilder();
+                                        if (pendingTransactionQueues.containsKey(channel)) {
+                                            pendingTransactionQueues.get(channel).add(setCommand);
+                                            setResponse.append("+QUEUED\r\n");
+                                        }
+                                        else {
+                                            setResponse.append(setCommand.processCommand());
+                                        }
 	                                    if (!isreplica) {
 	                                        // if this is the master we send the "+OK" response back to the client making the request
 	                                        // in addition we propagate the request to the replicas in the list
                                             writeOffset += 1;
-										    channel.write(responseBuffer);
+										    channel.write(ByteBuffer.wrap(setResponse.toString().getBytes()));
                                             master_repl_offset += message.getBytes().length;
 	                                        for (SocketChannel channelreplica : replicaSocketList) {
                                                 System.out.println("Propagating Write to replica: " + channelreplica.getRemoteAddress());
@@ -538,27 +506,11 @@ public class EventLoopServer {
 										break;
 
 									case "GET":
-										Instant expirationInstant = expiryTimes.get(parts[4]);
-										if (expirationInstant != null) {
-											System.out.println("Expiration Time for key '" + parts[4] + "': " + expirationInstant);
-											System.out.println("Current Time: " + Instant.now());
-											if (Instant.now().isAfter(expirationInstant)) {
-												// the case where the access occurs after the expiration
-												responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
-									            System.out.println("Key '" + parts[4] + "' has expired. Response Sent: $-1");
-												channel.write(responseBuffer);
-												break;
-											}
-										}
-										String key = (String) data.get(parts[4]);
-										if (key == null) {
-											responseBuffer = ByteBuffer.wrap("$-1\r\n".getBytes());
-										} else {
-											responseBuffer = ByteBuffer.wrap(("$" + key.length() + "\r\n" + key + "\r\n").getBytes());
-										}
-										System.out.println("Key found to send to client: " + key);
-										
-										channel.write(responseBuffer);
+                                        System.out.println("Get Command received");
+                                        GetCommand getCommand = new GetCommand(parts[4], data, expiryTimes);
+                                        
+                                        StringBuilder getResponse = getCommand.processCommand();
+                                        channel.write(ByteBuffer.wrap(getResponse.toString().getBytes()));
 										break;
 
 									case "CONFIG":
@@ -749,206 +701,65 @@ public class EventLoopServer {
                                         System.out.println("XADD command received");
                                         String streamName = parts[4];
                                         String streamId = parts[6];
-                                        System.out.println("The streamID is: " + streamId);
                                         
-                                        boolean fullyAutoGeneratedId = (streamId.equals("*"));
-                                        String[] entryParts = streamId.split("-");
-                           
                                         HashMap <String, String> streamData = new HashMap<>();
                                         for (int i = 8; i + 2 < parts.length; i += 4) {
                                             String streamKey = parts[i];
                                             String streamVal = parts[i + 2];
                                             streamData.put(streamKey, streamVal);
                                         }
-                                        boolean result = true;
-                                        boolean partiallyAutoGeneratedId = (!entryParts[0].equals("*") && entryParts[1].equals("*"));
-                                        if (!streamMap.containsKey(streamName)) {
-                                            System.out.println("Creating new stream with stream name " + streamName);
-                                            // if there is no stream with this name we create a new one
-                                            Stream newStream = new Stream();
-                                            if (partiallyAutoGeneratedId) {
-                                                System.out.println("Detected partiallyAutoGeneratedId");
-                                                if (entryParts[0].equals("0")) {
-                                                    streamId = "0-1";
-                                                } else {
-                                                    streamId = entryParts[0] + "-0";
-                                                }
-                                            } else if (fullyAutoGeneratedId) {
-                                                System.out.println("Detected fullyAutoGeneratedId");
-                                                streamId = String.valueOf(System.currentTimeMillis()) + "-0";
-                                            }
-                                            StreamNode newStreamNode = new StreamNode(streamId, streamData);
-                                            result = newStream.insertNewNode(newStreamNode);
-                                            if (result) {
-                                                System.out.println("Adding StreamName " + streamName + " to the streamMap");
-                                                streamMap.put(streamName, newStream);
-                                            }
-                                        } else {
-                                            // if there is a stream with this name we try to insert the new node 
-                                            Stream retrievedStream = streamMap.get(streamName);
-                                            String lastId = retrievedStream.lastID;
-                                            if (partiallyAutoGeneratedId) {
-                                                System.out.println("Detected partiallyAutoGeneratedId");
-                                                // if the id is of the form Long-*
-                                                if (lastId.split("-")[0].equals(entryParts[0])) {
-                                                    // if the last entered id (the largest) is a match - increment the sequence number of the lastId
-                                                    streamId = entryParts[0] + "-" + String.valueOf(Long.parseLong(lastId.split("-")[1]) + 1);
-                                                } else {
-                                                    // if the last entered id is not a match just create a new id with sequence number 0
-                                                    streamId = entryParts[0] + "-0";
-                                                } 
-                                            } else if (fullyAutoGeneratedId) {
-                                                System.out.println("Detected fullyAutoGeneratedId");
-                                                long timeForId = System.currentTimeMillis();
-                                                streamId = (timeForId > Long.parseLong(lastId.split("-")[0])) ? String.valueOf(timeForId) + "-0" : String.valueOf(timeForId) + "-" + String.valueOf(Long.parseLong(lastId.split("-")[1]) + 1);
-                                            }
-                                            System.out.println("Inserting streamId: " + streamId);
-                                            StreamNode newStreamNode = new StreamNode(streamId, streamData);
-                                            result = retrievedStream.insertNewNode(newStreamNode);
-                                            System.out.println("Result of inserting " + streamId + ": " + result);
-                                        }
-                                        if (!result) {
-                                            if (streamId.equals("0-0") || Long.parseLong(entryParts[0]) < Long.parseLong("0")) {
-                                                channel.write(ByteBuffer.wrap("-ERR The ID specified in XADD must be greater than 0-0\r\n".getBytes()));
-                                                break;
-                                            } else {
-                                                channel.write(ByteBuffer.wrap("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n".getBytes()));
-                                                break;
-                                            }
-                                        }
+                                        XaddCommand xaddCommand = new XaddCommand(streamName, streamId, streamMap, streamData);
                                         StringBuilder xaddResponse = new StringBuilder();
-                                        xaddResponse.append("$");
-                                        xaddResponse.append(streamId.length());
-                                        xaddResponse.append("\r\n" + streamId + "\r\n");
-                                        System.out.println("Sending XADD Response: " + xaddResponse.toString());
+                                        if (pendingTransactionQueues.containsKey(channel)) {
+                                            pendingTransactionQueues.get(channel).add(xaddCommand);
+                                            xaddResponse.append("+QUEUED\r\n");
+                                            
+                                        } else {
+                                            xaddResponse.append(xaddCommand.processCommand());
+                                        }
                                         channel.write(ByteBuffer.wrap(xaddResponse.toString().getBytes()));
-                                        
                                         // after sending XADD we should try to resolve the blocking Xreads
-                                        List<XReadBlock> toRemoveList_blocking = new ArrayList<>();
-                                        List<XReadBlock> toRemoveList_noTimeout = new ArrayList<>();
-                                        if (listBlockingXReads.size() != 0) {
-                                            System.out.println("Finished parsing and performing XADD, checking if xreads can be resolved (blocking)");
-                                            for (XReadBlock xread : listBlockingXReads) {
-                                                xReadProcessorReturnType xreadResult = xreadProcessor(xread.streamsWaitingOn, xread.lowBoundId);
-                                                if (!xreadResult.xReadResponse.toString().equals("$-1\r\n")) {
-                                                    System.out.println("this xadd resolved a blocking xread!");
-                                                    toRemoveList_blocking.add(xread);
-                                                    System.out.println(xreadResult.xReadResponse);
-                                                    StringBuilder starter = new StringBuilder("*").append(xreadResult.numStreamsWrittenTo).append("\r\n");
-                                                    xread.channel.write(ByteBuffer.wrap((starter.toString() + xreadResult.xReadResponse.toString()).getBytes()));
-                                                }
-                                            }
-                                        }
-                                        if (listNoTimeoutXReads.size() != 0) {
-                                            for (XReadBlock xread : listNoTimeoutXReads) {
-                                                xReadProcessorReturnType xreadResult = xreadProcessor(xread.streamsWaitingOn, xread.lowBoundId);
-                                                if (!xreadResult.xReadResponse.toString().equals("$-1\r\n")) {
-                                                    toRemoveList_noTimeout.add(xread);
-                                                    StringBuilder starter = new StringBuilder("*").append(xreadResult.numStreamsWrittenTo).append("\r\n");
-                                                    xread.channel.write(ByteBuffer.wrap((starter.toString() + xreadResult.xReadResponse.toString()).getBytes())); 
-                                                }
-                                            }
-                                        }
-                                        listBlockingXReads.removeAll(toRemoveList_blocking);
-                                        listNoTimeoutXReads.removeAll(toRemoveList_noTimeout);
-                                        break; 
+                                        XaddCommand resolveBlockXreads = new XaddCommand(null, null, streamMap, null);
+                                        resolveBlockXreads.propagateToPendingXreads(listBlockingXReads, listNoTimeoutXReads);
+                                        break;
 
                                     case "XRANGE":
-                                        System.out.println("Received XRANGE Command");
+                                        System.out.println("XRANGE command received");
                                         String range_start = parts[6];
                                         String range_end = parts[8];
                                         String streamKey = parts[4]; 
                          
-                                        Stream streamToQuery = streamMap.get(streamKey);
-
-                                        range_start = (range_start.equals("-")) ? "0-0" : range_start;
-                                        range_end = (range_end.equals("+")) ? streamToQuery.lastID : range_end;
-
-                                        System.out.println("Finding all nodes in the range: " + range_start + " to " + range_end);
-                                        ArrayList<NodeWithBuiltPrefix> nodesInRange = streamToQuery.findInRange(range_start, range_end); 
-
-                                        Collections.sort(nodesInRange, (a,b) -> a.prefixBuilt.compareTo(b.prefixBuilt));
-
-                                        System.out.println("Nodes in range: ");
-                                        for (NodeWithBuiltPrefix node: nodesInRange) {
-                                            System.out.println(node.prefixBuilt);
-                                        }
-                                        StringBuilder xrangeResponse = new StringBuilder();
-                                        xrangeResponse.append("*").append(nodesInRange.size()).append("\r\n");
-                                        for (NodeWithBuiltPrefix node: nodesInRange) {
-                                            xrangeResponse.append("*2\r\n");
-                                            String retrievedPrefix = node.prefixBuilt;
-                                            xrangeResponse.append("$").append(retrievedPrefix.length()).append("\r\n").append(retrievedPrefix).append("\r\n");
-                                            try {
-                                                System.out.println("Attempting to retrieve data at node: " + node.prefixBuilt);
-                                                HashMap<String, String> dataInNode = node.node.data;
-                                                int numKeyVals = 2 * dataInNode.size();
-                                                xrangeResponse.append("*").append(numKeyVals).append("\r\n");
-                                                for (String StreamNodeKey: dataInNode.keySet()) {
-                                                    int keyLength = StreamNodeKey.length();
-                                                    String StreamNodeVal = dataInNode.get(StreamNodeKey);
-                                                    int valLength = StreamNodeVal.length();
-                                                    xrangeResponse.append("$").append(keyLength).append("\r\n").append(StreamNodeKey).append("\r\n");
-                                                    xrangeResponse.append("$").append(valLength).append("\r\n").append(StreamNodeVal).append("\r\n");
-                                                }
-                                            } catch (Error e) {
-                                                e.printStackTrace();
-                                            }
-                                            
-                                        }
-                                        System.out.println("Response to XRANGE: ");
-                                        System.out.println(xrangeResponse);
+                                        XrangeCommand xrangeCommand = new XrangeCommand(range_start, range_end, streamKey, streamMap);
+                                        StringBuilder xrangeResponse = xrangeCommand.processCommand();
                                         channel.write(ByteBuffer.wrap(xrangeResponse.toString().getBytes())); 
                                         break;
 
                                     case "XREAD":
                                         System.out.println("XREAD command received");
-                                        boolean blockingXread = (parts[4].equalsIgnoreCase("block"));
-                                        int blockParserOffset = blockingXread ? 4 : 0;
-                                        int numPartsContent = Integer.parseInt(parts[0].replace("*","")) - 2; // subtract the parts corresponding to xread and streams and blocking 
-                                        if (blockingXread) {
-                                            System.out.println("XREAD command is blocking with wait time: " + parts[6]);
-                                            numPartsContent -= 2;
-                                        }
-                                        int numStreamsQuery = numPartsContent / 2;
-                                        ArrayList<String> xreadStreamNames= new ArrayList<>();
-                                        ArrayList<String> lowBounds = new ArrayList<>();
-                                        for (int i = 6 + blockParserOffset; i <= parts.length - (2 * numStreamsQuery); i += 2) {
-                                            xreadStreamNames.add(parts[i]);
-                                            if (parts[i + (2 * numStreamsQuery)].equals("$")) {
-                                                Stream StreamFromMap = streamMap.get(parts[i]);
-                                                String currStreamLastId = StreamFromMap.lastID;
-                                                lowBounds.add(currStreamLastId);
-                                            } else {
-                                                lowBounds.add(parts[i + (2 * numStreamsQuery)]);
-                                            }
-                                        }
-                                        System.out.println("Streams to XREAD: " + xreadStreamNames);
-                                        System.out.println("LowerBounds to process: " + lowBounds);
-                                         
-                                                                       
-                                        xReadProcessorReturnType xreadProcessorResult = xreadProcessor(xreadStreamNames, lowBounds);
-                                        StringBuilder xreadResponse = new StringBuilder("*").append(xreadProcessorResult.numStreamsWrittenTo).append("\r\n"); 
-                                        if (!xreadProcessorResult.xReadResponse.toString().equals("$-1\r\n")) {
+
+                                        XreadCommand xreadCommand = new XreadCommand(parts, streamMap, new ArrayList<String>(), new ArrayList<String>(), 0, false);
+                                        StringBuilder xreadContent = xreadCommand.processCommand(); 
+
+                                        StringBuilder xreadResponse = new StringBuilder("*").append(xreadCommand.numNodesWithDataRead).append("\r\n"); 
+                                        if (!xreadContent.toString().equals("$-1\r\n")) {
                                             System.out.println("Xread response obtained (non-nil)");
                                             System.out.println("xreadResponse:");
-                                            System.out.println(xreadProcessorResult.xReadResponse);
-                                            channel.write(ByteBuffer.wrap((xreadResponse.toString() + xreadProcessorResult.xReadResponse.toString()).getBytes()));
-
+                                            System.out.println(xreadContent);
+                                            channel.write(ByteBuffer.wrap((xreadResponse.toString() + xreadContent.toString()).getBytes()));
                                             break;
                                         } else {
-                                            if (blockingXread) {
-                                                List<Stream> Streams = xreadStreamNames.stream()
+                                            if (xreadCommand.blockingXread) {
+                                                List<Stream> Streams = xreadCommand.xreadStreamNames.stream()
                                                     .map(streamMap::get)
                                                     .collect(Collectors.toList());
                                                 Long xReadExpiry = System.currentTimeMillis() + Long.parseLong(parts[6]);
-                                                XReadBlock xreadBlockObject = new XReadBlock(new ArrayList<>(xreadStreamNames), channel, lowBounds, xReadExpiry);
+                                                XReadBlock xreadBlockObject = new XReadBlock(xreadCommand.xreadStreamNames, channel, xreadCommand.lowBounds, xReadExpiry);
                                                 if (Long.parseLong(parts[6]) == Long.parseLong("0")) {
                                                     // if timeout is 0 then it is blocking without timeout
                                                     System.out.println("Found xread with timeout 0");
                                                     listNoTimeoutXReads.add(xreadBlockObject);
                                                 } else {
-                                                    // otherwise add it here
+                                                    // otherwise add it he
                                                     listBlockingXReads.add(xreadBlockObject);
                                                 }
                                                 System.out.println("Registered block xread object with expiry: " + xReadExpiry);
@@ -956,30 +767,54 @@ public class EventLoopServer {
                                             } else {
                                                 // no results and not a blockingXread
                                                 System.out.println("No results and not a blocking xread - returning immediately");
-                                                channel.write(ByteBuffer.wrap(xreadProcessorResult.xReadResponse.toString().getBytes()));
+                                                channel.write(ByteBuffer.wrap(xreadContent.toString().getBytes()));
                                                 break;
                                             }
-                                        }
+                                        } 
                                     case "INCR":
                                         // increment the value associated with the received key by 1 
                                         // if the key does not exist in the hashmap - we set the value to 1
                                         System.out.println("INCR command received");
-                                        String keyToIncr = parts[4];
-                                        String valToIncr = data.getOrDefault(keyToIncr, "0");
-                                        try {
-                                            String newVal = String.valueOf(Long.parseLong(valToIncr) + 1);
-                                            data.put(keyToIncr, newVal);
-                                            
-                                            StringBuilder incrResponse = new StringBuilder(":");
-                                            incrResponse.append(newVal).append("\r\n");
-                                            channel.write(ByteBuffer.wrap(incrResponse.toString().getBytes()));
-                                            break;
-                                        } catch (NumberFormatException e) {
-                                            // if the value to increment is non-numeric we should return an Error
-                                            channel.write(ByteBuffer.wrap("-ERR value is not an integer or out of range\r\n".getBytes()));
+                                        StringBuilder incrResponse = new StringBuilder();
+                                        IncrCommand incrCommand = new IncrCommand(parts[4], data);
+                                        if (pendingTransactionQueues.containsKey(channel)) {
+                                            System.out.println("Active MULTI command in channel");
+                                            pendingTransactionQueues.get(channel).add(incrCommand);
+                                            incrResponse.append("+QUEUED\r\n");
+
+                                        } else {
+                                            incrResponse.append(incrCommand.processCommand());
+                                        } 
+                                        System.out.println("IncrResponse: ");
+                                        System.out.println(incrResponse);
+                                        channel.write(ByteBuffer.wrap(incrResponse.toString().getBytes()));
+                                        break;
+                                
+                                    case "MULTI":
+                                        System.out.println("MULTI command received");
+                                        if (pendingTransactionQueues.containsKey(channel)) {
+                                            System.out.println("Pending transaction already in progress for this channel");
                                             break;
                                         }
-                                
+                                        Queue<RedisCommand> transactionQueue = new ArrayDeque<>();
+                                        pendingTransactionQueues.put(channel, transactionQueue); 
+                                        channel.write(ByteBuffer.wrap("+OK\r\n".getBytes()));
+                                        break;
+
+                                    case "EXEC":
+                                        System.out.println("EXEC command received");
+                                        if (!pendingTransactionQueues.containsKey(channel)) {
+                                            System.out.println("EXEC command received without MULTI");
+                                            channel.write(ByteBuffer.wrap("-ERR EXEC without MULTI\r\n".getBytes()));
+                                            break;
+                                        }
+                                        if (pendingTransactionQueues.get(channel).size() == 0) {
+                                            System.out.println("EXEC received with no queued commands");
+                                            channel.write(ByteBuffer.wrap("*0\r\n".getBytes()));
+                                            pendingTransactionQueues.remove(channel);
+                                            break;
+                                        }
+                                        break;
 
 									default: 
 					    				break;

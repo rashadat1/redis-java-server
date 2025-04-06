@@ -1,7 +1,7 @@
 import java.time.Instant;
 import java.util.concurrent.ConcurrentHashMap;
 
-public class SetCommand extends RedisCommand {
+public class SetCommand implements RedisCommand {
     String key;
     String value;
     String expiry;
@@ -18,7 +18,7 @@ public class SetCommand extends RedisCommand {
     @Override
     public StringBuilder processCommand() {
         this.db.put(this.key, this.value);
-        if (this.expiry == null) {
+        if (this.expiry.equals("none")) {
             // set command without PX
             this.expiryTimes.remove(this.key);
         } else {

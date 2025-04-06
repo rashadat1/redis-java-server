@@ -1,6 +1,7 @@
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Stack;
+
 class StreamNode {
     String prefix;
     HashMap<String,String> data;
@@ -281,18 +282,42 @@ public class Stream {
     }
     public static void main(String[] args) {
         Stream stream = new Stream();
-        StreamNode node1 = new StreamNode("1526919030474-0");
-        StreamNode node2 = new StreamNode("1526919030474-1");
-        StreamNode node3 = new StreamNode("1526919030500-0");
-        StreamNode node4 = new StreamNode("9999999999999-0");
-        StreamNode node5 = new StreamNode("9999999950000-0");
-        StreamNode node6 = new StreamNode("1234543212341-0");
-        StreamNode node7 = new StreamNode("1341243231459-0");
-        StreamNode node8 = new StreamNode("1341255555555-0");
-        StreamNode node9 = new StreamNode("1341255555555-1");
-        StreamNode node10 = new StreamNode("1526933000000-0");
-        StreamNode node11 = new StreamNode("1526933050000-0");
-        StreamNode node12 = new StreamNode("1341243559990-0");
+        ArrayList<StreamNode> nodeList = new ArrayList<>();
+        StreamNode node1 = new StreamNode("1026919030474-0");
+        StreamNode node2 = new StreamNode("1026919030474-1");
+        StreamNode node3 = new StreamNode("1026919990000-0");
+        StreamNode node4 = new StreamNode("1026919990030-0");
+        StreamNode node5 = new StreamNode("1526919030500-0");
+        StreamNode node6 = new StreamNode("1526933000000-0");
+        StreamNode node7 = new StreamNode("1526933050000-0");
+        StreamNode node8 = new StreamNode("1734543212341-0");
+        StreamNode node9 = new StreamNode("1734543231459-0");
+        StreamNode node10 = new StreamNode("1734543235000-0");
+        StreamNode node11 = new StreamNode("2041255555555-0");
+        StreamNode node12 = new StreamNode("2041255555555-0");
+        StreamNode node13 = new StreamNode("2041255573291-0");
+        StreamNode node14 = new StreamNode("8999999999999-0");
+;       
+        nodeList.add(node1);
+        nodeList.add(node2);
+        nodeList.add(node3);
+        nodeList.add(node4);
+        nodeList.add(node5);
+        nodeList.add(node6);
+        nodeList.add(node7);
+        nodeList.add(node8);
+        nodeList.add(node9);
+        nodeList.add(node10);
+        nodeList.add(node11);
+        nodeList.add(node12);
+        nodeList.add(node13);
+        nodeList.add(node14);
+
+        for (StreamNode node : nodeList) {
+            stream.printTree(stream.root,"");
+            stream.insertNewNode(node);
+        };
+
         stream.insertNewNode(node1);
         stream.insertNewNode(node2);
         stream.insertNewNode(node3);
@@ -312,18 +337,16 @@ public class Stream {
         StreamNode node2_2 = new StreamNode("0-2");
         StreamNode node2_3 = new StreamNode("0-3");
         StreamNode node2_4 = new StreamNode("0-4");
-        StreamNode node2_12 = new StreamNode("0-12");
-        StreamNode node2_24 = new StreamNode("0-24");
 
         stream2.insertNewNode(node2_1);
-        stream2.printTree(stream2.root,"");
+        //stream2.printTree(stream2.root,"");
         stream2.insertNewNode(node2_2);
-        stream2.printTree(stream2.root,"");
+        //stream2.printTree(stream2.root,"");
         stream2.insertNewNode(node2_3);
-        stream2.printTree(stream2.root,"");
+        //stream2.printTree(stream2.root,"");
         stream2.insertNewNode(node2_4);
 
-        stream2.printTree(stream2.root,"");
+        //stream2.printTree(stream2.root,"");
         System.out.println(stream.getClass());
         System.out.println(stream.getClass() == Stream.class);
     }
