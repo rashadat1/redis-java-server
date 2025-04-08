@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Set;
@@ -42,6 +43,7 @@ public class EventLoopServer {
     private static ArrayList<XReadBlock> listBlockingXReads = new ArrayList<>();
     private static ArrayList<XReadBlock> listNoTimeoutXReads = new ArrayList<>();
     private static HashMap<SocketChannel, Queue<RedisCommand>> pendingTransactionQueues = new HashMap<>();
+    private static ArrayList<SaveCommand> saveCommandSchedule = new ArrayList<>();
 
     private static int parsedREPLACK = 0;
     final static HashMap<String, Stream> streamMap = new HashMap<>();
@@ -477,7 +479,7 @@ public class EventLoopServer {
                                         SetCommand setCommand; 
                                         if (parts.length == 11 && parts[8].equalsIgnoreCase("PX")) {
                                             // set command with expiration
-                                            System.out.println("Creating set Command object with expiry"); 
+                                        System.out.println("Creating set Command object with expiry"); 
                                             setCommand = new SetCommand(parts[4], parts[6], parts[10], data, expiryTimes);
                                         } else {
                                             // set command without expiration
@@ -508,10 +510,15 @@ public class EventLoopServer {
 									case "GET":
                                         System.out.println("Get Command received");
                                         GetCommand getCommand = new GetCommand(parts[4], data, expiryTimes);
-                                        
-                                        StringBuilder getResponse = getCommand.processCommand();
+                                        StringBuilder getResponse = new StringBuilder();
+                                        if (pendingTransactionQueues.containsKey(channel)) {
+                                            pendingTransactionQueues.get(channel).add(getCommand);
+                                            getResponse.append("+QUEUED\r\n");
+                                        } else {
+                                            getResponse.append(getCommand.processCommand());
+                                        } 
                                         channel.write(ByteBuffer.wrap(getResponse.toString().getBytes()));
-										break;
+                                        break;
 
 									case "CONFIG":
 										String commandStr = null;
@@ -804,18 +811,49 @@ public class EventLoopServer {
                                     case "EXEC":
                                         System.out.println("EXEC command received");
                                         if (!pendingTransactionQueues.containsKey(channel)) {
+                                            // EXEC command received but no transaction queue created
                                             System.out.println("EXEC command received without MULTI");
                                             channel.write(ByteBuffer.wrap("-ERR EXEC without MULTI\r\n".getBytes()));
                                             break;
                                         }
                                         if (pendingTransactionQueues.get(channel).size() == 0) {
+                                            // EXEC command received, transaction queue created but no commands have been queued
                                             System.out.println("EXEC received with no queued commands");
                                             channel.write(ByteBuffer.wrap("*0\r\n".getBytes()));
                                             pendingTransactionQueues.remove(channel);
                                             break;
+                                        } else {
+                                            // EXEC command received, transaction queue created, and commands exist in the queued
+                                            System.out.println("EXEC command received, executing queued commands");
+                                            Queue<RedisCommand> queuedTransactions = pendingTransactionQueues.get(channel);
+                                            StringBuilder execQueueResponse = new StringBuilder("*").append(queuedTransactions.size()).append("\r\n");
+                                            while (!queuedTransactions.isEmpty()) {
+                                                RedisCommand redisCommand = queuedTransactions.poll();
+                                                System.out.println("Executing redis command" + redisCommand);
+                                                StringBuilder responseToCommand = redisCommand.processCommand();
+                                                execQueueResponse.append(responseToCommand);
+                                            }
+                                            pendingTransactionQueues.remove(channel);
+                                            channel.write(ByteBuffer.wrap(execQueueResponse.toString().getBytes()));
+                                            break;
                                         }
+                                    case "DISCARD":
+                                        System.out.println("Discard command received");
+                                        if (pendingTransactionQueues.containsKey(channel)) {
+                                            pendingTransactionQueues.remove(channel);
+                                            channel.write(ByteBuffer.wrap("+OK\r\n".getBytes()));
+                                            break;
+                                        }
+                                        channel.write(ByteBuffer.wrap("-ERR DISCARD without MULTI\r\n".getBytes()));
                                         break;
-
+                                    case "BGSAVE":
+                                        System.out.println("BGSAVE command received");
+                                        SaveCommand saveCommand = new SaveCommand(null, System.currentTimeMillis(), Long.parseLong("50"), data, expiryTimes, streamMap); 
+                                        if (saveCommandSchedule.size() == 1) {
+                                            saveCommandSchedule.remove(0);
+                                        }
+                                        saveCommandSchedule.add(saveCommand);
+                                        break;
 									default: 
 					    				break;
 
