@@ -22,7 +22,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 // Build Redis
-public class EventLoopServer {
+
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLEngineResult;
+public class EventLoopServerSecure {
 	
 	private static int port = 6379;
 	public static ConcurrentHashMap<String, String> data = new ConcurrentHashMap<>();
@@ -35,7 +39,7 @@ public class EventLoopServer {
 	private static String master_host = null;
 	private static int master_port = 0;
     final static String empty_rdb_contents = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
-    final static List<SocketChannel> replicaSocketList = new CopyOnWriteArrayList<>();
+    final static List<ConnectionContext> replicaConnectionContextList = new CopyOnWriteArrayList<>();
 	private static int replConfOffset = 0;
     private static int acknowledgedReplicas = 0;
     private static int writeOffset = 0;
@@ -44,6 +48,11 @@ public class EventLoopServer {
     private static ArrayList<XReadBlock> listNoTimeoutXReads = new ArrayList<>();
     private static HashMap<SocketChannel, Queue<RedisCommand>> pendingTransactionQueues = new HashMap<>();
     private static ArrayList<SaveCommand> saveCommandSchedule = new ArrayList<>();
+	private static String keystorePassword;
+	private static String trustStorePassword;
+	private static SSLContext sslContext = SSLUtil.createSSLContext(keystorePassword, trustStorePassword);
+	// if prod flag is true we require any connection be authenticated
+	private static ArrayList<SocketChannel> authenticatedSockets = new ArrayList<>();
 
     private static int parsedREPLACK = 0;
     final static HashMap<String, Stream> streamMap = new HashMap<>();
@@ -247,6 +256,68 @@ public class EventLoopServer {
 			}
 		}
     }
+	private static void doHandshakeStep(ConnectionContext ctx) throws IOException {
+		SSLEngineResult result;
+		SSLEngineResult.HandshakeStatus handshakeStatus = ctx.sslEngine.getHandshakeStatus();
+
+		while (true) {
+			switch (handshakeStatus) {
+				case NEED_UNWRAP:
+					int bytesRead = ctx.channel.read(ctx.peerNetData); // read bytes from channel into peerNetData buffer
+					if (bytesRead == -1) {
+						throw new IOException("Channel closed before handshake");
+					}
+					ctx.peerNetData.flip(); // flip for reading
+					result = ctx.sslEngine.unwrap(ctx.peerNetData, ctx.peerAppData);
+					ctx.peerNetData.compact();
+					handshakeStatus = result.getHandshakeStatus();
+					break;
+
+				case NEED_WRAP:
+				case NEED_UNWRAP_AGAIN:
+					ctx.netData.clear();
+					result = ctx.sslEngine.wrap(ctx.appData, ctx.netData);
+					ctx.netData.flip();
+					while (ctx.netData.hasRemaining()) {
+						ctx.channel.write(ctx.netData);
+					}
+					handshakeStatus = result.getHandshakeStatus();
+					break;
+
+				case NEED_TASK:
+					Runnable task;
+					while ((task = ctx.sslEngine.getDelegatedTask()) != null) {
+						task.run();
+					}
+					handshakeStatus = ctx.sslEngine.getHandshakeStatus();
+					break;
+
+				case FINISHED:
+				case NOT_HANDSHAKING:
+					ctx.handshaking = false;
+					System.out.println("Handshake complete for connection: " + ctx.channel.getRemoteAddress());
+					return;
+			}
+			if (handshakeStatus == SSLEngineResult.HandshakeStatus.NEED_UNWRAP && ctx.peerNetData.position() == 0) {
+				break;
+			}
+		}
+	}
+	private static void encryptAndSendResponse(ConnectionContext ctx, String response) throws IOException {
+		ctx.appData.clear();
+		ctx.netData.clear();
+
+		ctx.appData.put(response.getBytes());
+		ctx.appData.flip();
+		ctx.sslEngine.wrap(ctx.appData, ctx.netData);
+
+		ctx.netData.flip();
+		while (ctx.netData.hasRemaining()) {
+			ctx.channel.write(ctx.netData);
+		}
+		ctx.appData.clear();
+		ctx.netData.clear();
+	}
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			parseArgs(args);
@@ -258,9 +329,7 @@ public class EventLoopServer {
 			// bind the server channel to the specified port and register
 			// the channel with the selector
 			serverChannel.bind(new InetSocketAddress(port));
-			serverChannel.register(selector,SelectionKey.OP_ACCEPT);
-			ByteBuffer buffer = ByteBuffer.allocate(256);
-			
+			serverChannel.register(selector,SelectionKey.OP_ACCEPT);			
 			System.out.println("Server is running on port " + port);
 		
 			
@@ -409,8 +478,14 @@ public class EventLoopServer {
 							// if there is no client awaiting connection then we immediately return null
 							// if not clientChannel is a reference to the connection with the client
 							clientChannel.configureBlocking(false);
+							SSLEngine sslEngine = sslContext.createSSLEngine();
+							sslEngine.setUseClientMode(false);
+							sslEngine.setNeedClientAuth(true);
+
+							sslEngine.beginHandshake();
+							ConnectionContext context = new ConnectionContext(clientChannel, sslEngine, "client");
 							// Register for read events
-							clientChannel.register(selector,  SelectionKey.OP_READ, "client");
+							clientChannel.register(selector,  SelectionKey.OP_READ, context);
 							System.out.println("New client connected: " + clientChannel.getRemoteAddress());
 						} else {
 							continue;
@@ -418,23 +493,35 @@ public class EventLoopServer {
 					} else if (currKey.isReadable()) {
 						// check if event on the channel is a READ event
 						SocketChannel channel = (SocketChannel) currKey.channel();
-						String sourceType = (String) currKey.attachment(); // retrieve metadata - master or client
+						ConnectionContext ctx = (ConnectionContext) currKey.attachment(); // retrieve metadata - master or client
+						String sourceType = ctx.entity;
 						System.out.println("Reading from " + sourceType + " channel" + channel.getRemoteAddress());
-
-                        buffer.clear();
+						
+						if (ctx.handshaking) {
+							doHandshakeStep(ctx);
+							break;
+						}
 						// clears the byte buffer to prepare it for a new read operation
-						int bytesRead = channel.read(buffer); // read returns the number of bytes read - if no data is available returns 0, if client closed connection return -1
+						ctx.peerNetData.clear(); // read into the encrypted input buffer
+						int bytesRead = ctx.channel.read(ctx.peerNetData);
 						if (bytesRead == -1) {
-							System.out.println("Channel disconnected: " + channel.getRemoteAddress());
+							System.out.println("Channel disconnected: " + ctx.channel.getRemoteAddress());
 							currKey.cancel(); // cancel the key and remove it from the Selector
-							channel.close();
+							ctx.channel.close();
 							continue; // continue to the next key
 						}
-						buffer.flip();
+						ctx.peerNetData.flip();
                         System.out.println(sourceType + " wrote " + bytesRead + " bytes");
-						// prepares the ByteBuffer for reading the data it has received - set buffer limit to the current position
-						// and resets the position to 0 so we can start reading at the beginning of the buffer
-						String message = new String(buffer.array(), 0, bytesRead);
+						// Unwrap the encrypted bytes into plain text
+						SSLEngineResult result = ctx.sslEngine.unwrap(ctx.peerNetData, ctx.peerAppData);
+						
+						ctx.peerNetData.compact();
+						ctx.peerAppData.flip(); // flip to read the plain text
+						
+						// creates a byte array 
+						byte[] plainText = new byte[ctx.peerAppData.remaining()];
+						ctx.peerAppData.get(plainText);
+						String message = new String(plainText);
 						// buffer.array is the byte array backing the :wantbuffer 0 and bytesRead are the starting and ending points of the read
 						String[] subcommands = message.split("(?=\\*[0-9])");
 						for (String subcommand : subcommands) {
@@ -457,9 +544,8 @@ public class EventLoopServer {
 								switch(command) {
 									case "PING":
                                         String pingResponse = "+PONG\r\n";
-										responseBuffer = ByteBuffer.wrap(pingResponse.getBytes());
                                         if (!isreplica) {
-										    channel.write(responseBuffer);
+											encryptAndSendResponse(ctx, pingResponse);
                                             master_repl_offset += pingResponse.getBytes().length;
                                         }
 										break;
@@ -469,7 +555,7 @@ public class EventLoopServer {
                                         String echoResponse = parts[3] + "\r\n" + parts[4] + "\r\n"; 
 										responseBuffer = ByteBuffer.wrap(echoResponse.getBytes());
                                         if (!isreplica) {
-										    channel.write(responseBuffer);
+										    encryptAndSendResponse(ctx, echoResponse);
                                             master_repl_offset += echoResponse.getBytes().length;
                                         }
 										break;
@@ -498,11 +584,11 @@ public class EventLoopServer {
 	                                        // if this is the master we send the "+OK" response back to the client making the request
 	                                        // in addition we propagate the request to the replicas in the list
                                             writeOffset += 1;
-										    channel.write(ByteBuffer.wrap(setResponse.toString().getBytes()));
+											encryptAndSendResponse(ctx, setResponse.toString());
                                             master_repl_offset += message.getBytes().length;
-	                                        for (SocketChannel channelreplica : replicaSocketList) {
-                                                System.out.println("Propagating Write to replica: " + channelreplica.getRemoteAddress());
-	                                            channelreplica.write(ByteBuffer.wrap(message.getBytes()));
+	                                        for (ConnectionContext replicaContext : replicaConnectionContextList) {
+                                                System.out.println("Propagating Write to replica: " + replicaContext.channel.getRemoteAddress());
+												encryptAndSendResponse(replicaContext, message);
 	                                        }
 	                                    }
 										break;
@@ -517,7 +603,7 @@ public class EventLoopServer {
                                         } else {
                                             getResponse.append(getCommand.processCommand());
                                         } 
-                                        channel.write(ByteBuffer.wrap(getResponse.toString().getBytes()));
+                                        encryptAndSendResponse(ctx, getResponse.toString());
                                         break;
 
 									case "CONFIG":
@@ -537,8 +623,8 @@ public class EventLoopServer {
 												commandStr = "$10\r\ndbfilename\r\n";
 												paramValue = dbfilename != null ? dbfilename: "";
 											}
-										responseBuffer = ByteBuffer.wrap((prefix + commandStr + "$" + paramValue.length() + "\r\n" + paramValue + "\r\n").getBytes());
-										channel.write(responseBuffer);
+										String configResponse = prefix + commandStr + "$" + paramValue.length() + "\r\n" + paramValue + "\r\n";
+										encryptAndSendResponse(ctx, configResponse);
 										}
 										break;
 
@@ -554,8 +640,7 @@ public class EventLoopServer {
                                         data.keySet().forEach(k -> {
                                             KeysResponse.append("$").append(k.length()).append("\r\n").append(k).append("\r\n");
                                         });
-                                        responseBuffer = ByteBuffer.wrap(KeysResponse.toString().getBytes());
-                                        channel.write(responseBuffer);
+										encryptAndSendResponse(ctx, KeysResponse.toString());
                                         break;
 
 									case "INFO":
@@ -573,8 +658,7 @@ public class EventLoopServer {
 												info += "\r\nmaster_repl_offset:0\r\nmaster_replid:" + master_id;
 											}
 											InfoResponse.append(info.length()).append("\r\n").append(info).append("\r\n");
-											responseBuffer = ByteBuffer.wrap(InfoResponse.toString().getBytes());
-											channel.write(responseBuffer);
+											encryptAndSendResponse(ctx, InfoResponse.toString());
 										}
 										break;
 
@@ -587,15 +671,14 @@ public class EventLoopServer {
                                             response.append("\r\n");
                                             response.append(replConfOffset);
                                             response.append("\r\n");
-                                            responseBuffer = ByteBuffer.wrap(response.toString().getBytes());
-                                            channel.write(responseBuffer);
+											encryptAndSendResponse(ctx, response.toString());
                                             System.out.println("Adding REPLCONF GETACK Bytes: " + subcommand.getBytes().length);
                                             replConfOffset += subcommand.getBytes().length;
                                         
                                         } else if (parts.length >= 4 && parts[4].equalsIgnoreCase("ACK")) {
                                             System.out.println("ACK received from replica");
                                             parsedREPLACK++;
-                                            System.out.println(parsedREPLACK + "th ACK received out of " + replicaSocketList.size() + " total replicas connected");
+                                            System.out.println(parsedREPLACK + "th ACK received out of " + replicaConnectionContextList.size() + " total replicas connected");
                                             int replConfOffset = Integer.parseInt(parts[6]);
                                             
                                             if (waitRequest != null || waitRequest == null) {
@@ -607,10 +690,10 @@ public class EventLoopServer {
                                                     System.out.println("Current Time: " + System.currentTimeMillis());
                                                     System.out.println("Expiry: " + waitRequest.timeOut);
                                                 }
-                                                if (acknowledgedReplicas >= waitRequest.numReplicas || System.currentTimeMillis() >= waitRequest.timeOut || parsedREPLACK == replicaSocketList.size()) {
+                                                if (acknowledgedReplicas >= waitRequest.numReplicas || System.currentTimeMillis() >= waitRequest.timeOut || parsedREPLACK == replicaConnectionContextList.size()) {
                                                     System.out.println("Wait command completed returning: " + ":" + acknowledgedReplicas + "\r\n");
-                                                    responseBuffer = ByteBuffer.wrap((":" + acknowledgedReplicas + "\r\n").getBytes());
-                                                    waitRequest.channel.write(responseBuffer);
+                                                    String waitRequestResponse = ":" + acknowledgedReplicas + "\r\n";
+													encryptAndSendResponse(waitRequest.ctx, waitRequestResponse);
                                                     waitRequest = null;
                                                     master_repl_offset += "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n1\r\n*\r\n".getBytes().length;
                                                     writeOffset = 0;
@@ -621,9 +704,9 @@ public class EventLoopServer {
                                             
                                         } else if (!isreplica){
                                             System.out.println("REPLCONF command received");
-                                            responseBuffer = ByteBuffer.wrap("+OK\r\n".getBytes());
-                                            // replica only respons to REPLCONF GETACKs from the master. The master will receive plain REPLCONF from replica during handshake
-                                            channel.write(responseBuffer);
+                                            String response = "+OK\r\n";
+                                            // replica only responds to REPLCONF GETACKs from the master. The master will receive plain REPLCONF from replica during handshake
+                                            encryptAndSendResponse(ctx, response);
                                             break;
                                         } else {
                                             System.out.println("SOMETHING UNEXPECTED IS HAPPENING WITH REPLCONF");
@@ -635,8 +718,7 @@ public class EventLoopServer {
                                         System.out.println("Resetting master_repl_offset to 0");
                                         master_repl_offset = 0;
 	                                    String PsyncResponse = "+FULLRESYNC " + master_replid + " " + master_repl_offset + "\r\n";
-	                                    responseBuffer = ByteBuffer.wrap(PsyncResponse.toString().getBytes());
-	                                    channel.write(responseBuffer);
+	                                    encryptAndSendResponse(ctx, PsyncResponse);
 	                           
 	                                    // Convert raw hex string for empty RDB file contents into raw binary data (byte array)
 	                                    // get the length of the byte array then wrap the content as bytes and send the length  
@@ -644,23 +726,23 @@ public class EventLoopServer {
 	                                    byte[] decodedRdb = decodeHex(empty_rdb_contents);
 	                                    String rdbHeader = "$" + decodedRdb.length + "\r\n";
 	                                    // Send RDB file length header
-	                                    channel.write(ByteBuffer.wrap(rdbHeader.getBytes()));
+										encryptAndSendResponse(ctx, rdbHeader);
 	                                    // Send RDB file contents
-	                                    channel.write(ByteBuffer.wrap(decodedRdb));
-	                                    System.out.println("Added Replica to list: " + channel.getRemoteAddress());
+										encryptAndSendResponse(ctx, new String(decodedRdb));
+	                                    System.out.println("Added Replica to list: " + ctx.channel.getRemoteAddress());
                                         // register the replica channel with the Selector
-                                        channel.configureBlocking(false);
-                                        channel.register(selector, SelectionKey.OP_READ, "replica");
-                                        System.out.println("Replica registered with selector for OP_READ: " + channel.getRemoteAddress());
-                                    	replicaSocketList.add(channel);
+                                        ctx.channel.configureBlocking(false);
+                                        ctx.channel.register(selector, SelectionKey.OP_READ, "replica");
+                                        System.out.println("Replica registered with selector for OP_READ: " + ctx.channel.getRemoteAddress());
+                                    	replicaConnectionContextList.add(ctx);
 	                                    break;
 
                                     case "WAIT":
                                         System.out.println("WAIT command received");
-                                        System.out.println("There are " + replicaSocketList.size() + " total replicas");
-                                        if (replicaSocketList.size() == 0) {
+                                        System.out.println("There are " + replicaConnectionContextList.size() + " total replicas");
+                                        if (replicaConnectionContextList.size() == 0) {
                                             // if no replicas return immediately
-                                            channel.write(ByteBuffer.wrap(":0\r\n".getBytes()));
+											encryptAndSendResponse(ctx, ":0\r\n");
                                             break;
                                         }
                                         int numReplicas = Integer.parseInt(parts[4]);
@@ -668,17 +750,17 @@ public class EventLoopServer {
                                         long expiry = System.currentTimeMillis() + timeOut;
                                         // store WAIT command details
                                         System.out.println("Creating WaitRequest instance - " + "numReplicas: " + numReplicas + " expiry: " + expiry);
-                                        waitRequest = new WaitRequest(numReplicas, expiry, channel);
+                                        waitRequest = new WaitRequest(numReplicas, expiry, ctx);
                                         if (writeOffset == 0) {
-                                            channel.write(ByteBuffer.wrap((":" + replicaSocketList.size() + "\r\n").getBytes()));
+											encryptAndSendResponse(ctx, ":" + replicaConnectionContextList.size() + "\r\n");
                                             break;
                                         }
                                         String replMessage = "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n";
 
-                                        for (SocketChannel replicaSocket : replicaSocketList) {
+                                        for (ConnectionContext replicaContext : replicaConnectionContextList) {
                                             // Send REPLCONF GETACK to all replicas
-                                            replicaSocket.write(ByteBuffer.wrap(replMessage.getBytes()));
-                                            System.out.println("Sent REPLCONF GETACK to replica: " + replicaSocket.getRemoteAddress());
+											encryptAndSendResponse(replicaContext, replMessage);
+                                            System.out.println("Sent REPLCONF GETACK to replica: " + replicaContext.channel.getRemoteAddress());
                                         }
                                         parsedREPLACK = 0;
                                         // break so we do not block here - we want the main loop to continue execution
@@ -701,7 +783,7 @@ public class EventLoopServer {
                                         typeResponse.append("\r\n");
                                         String typeResponseString = typeResponse.toString();
                                         System.out.println("Sending the following response: " + typeResponseString);
-                                        channel.write(ByteBuffer.wrap(typeResponseString.getBytes()));
+                                        encryptAndSendResponse(ctx, typeResponseString);
                                         break;
 
                                     case "XADD":
@@ -724,7 +806,7 @@ public class EventLoopServer {
                                         } else {
                                             xaddResponse.append(xaddCommand.processCommand());
                                         }
-                                        channel.write(ByteBuffer.wrap(xaddResponse.toString().getBytes()));
+										encryptAndSendResponse(ctx, xaddResponse.toString());
                                         // after sending XADD we should try to resolve the blocking Xreads
                                         XaddCommand resolveBlockXreads = new XaddCommand(null, null, streamMap, null);
                                         resolveBlockXreads.propagateToPendingXreads(listBlockingXReads, listNoTimeoutXReads);
@@ -738,7 +820,7 @@ public class EventLoopServer {
                          
                                         XrangeCommand xrangeCommand = new XrangeCommand(range_start, range_end, streamKey, streamMap);
                                         StringBuilder xrangeResponse = xrangeCommand.processCommand();
-                                        channel.write(ByteBuffer.wrap(xrangeResponse.toString().getBytes())); 
+                                        encryptAndSendResponse(ctx, xrangeResponse.toString());
                                         break;
 
                                     case "XREAD":
@@ -752,7 +834,8 @@ public class EventLoopServer {
                                             System.out.println("Xread response obtained (non-nil)");
                                             System.out.println("xreadResponse:");
                                             System.out.println(xreadContent);
-                                            channel.write(ByteBuffer.wrap((xreadResponse.toString() + xreadContent.toString()).getBytes()));
+											
+											encryptAndSendResponse(ctx, xreadResponse.toString() + xreadContent.toString());
                                             break;
                                         } else {
                                             if (xreadCommand.blockingXread) {
@@ -760,13 +843,13 @@ public class EventLoopServer {
                                                     .map(streamMap::get)
                                                     .collect(Collectors.toList());
                                                 Long xReadExpiry = System.currentTimeMillis() + Long.parseLong(parts[6]);
-                                                XReadBlock xreadBlockObject = new XReadBlock(xreadCommand.xreadStreamNames, channel, xreadCommand.lowBounds, xReadExpiry);
+                                                XReadBlock xreadBlockObject = new XReadBlock(xreadCommand.xreadStreamNames, ctx, xreadCommand.lowBounds, xReadExpiry);
                                                 if (Long.parseLong(parts[6]) == Long.parseLong("0")) {
                                                     // if timeout is 0 then it is blocking without timeout
                                                     System.out.println("Found xread with timeout 0");
                                                     listNoTimeoutXReads.add(xreadBlockObject);
                                                 } else {
-                                                    // otherwise add it he
+                                                    // otherwise add it the list of xreads that are blocking with timeout
                                                     listBlockingXReads.add(xreadBlockObject);
                                                 }
                                                 System.out.println("Registered block xread object with expiry: " + xReadExpiry);
@@ -774,7 +857,7 @@ public class EventLoopServer {
                                             } else {
                                                 // no results and not a blockingXread
                                                 System.out.println("No results and not a blocking xread - returning immediately");
-                                                channel.write(ByteBuffer.wrap(xreadContent.toString().getBytes()));
+												encryptAndSendResponse(ctx, xreadContent.toString());
                                                 break;
                                             }
                                         } 
@@ -858,7 +941,7 @@ public class EventLoopServer {
 					    				break;
 
 								}
-									
+								ctx.peerAppData.clear();
 							}
                         }
 					}
