@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
-import java.util.LinkedList;
 import java.util.List;
 import java.util.Queue;
 import java.util.Set;
@@ -318,6 +317,32 @@ public class EventLoopServerSecure {
 		ctx.appData.clear();
 		ctx.netData.clear();
 	}
+
+	private static String readEncrypted(ConnectionContext ctx) throws IOException {
+		ctx.peerAppData.clear();
+		ctx.peerNetData.clear();
+		
+		int bytesRead = ctx.channel.read(ctx.peerNetData);
+		if (bytesRead == -1) {
+			System.out.println("Master disconnected before handshake: " + ctx.channel.getRemoteAddress());
+			return "Master disconnect";
+		}
+		ctx.peerNetData.flip();
+
+		ctx.sslEngine.unwrap(ctx.peerNetData, ctx.peerAppData);
+		ctx.peerNetData.compact();
+
+		ctx.peerAppData.flip();
+
+		byte[] plainText = new byte[ctx.peerAppData.remaining()];
+		ctx.peerAppData.get(plainText);
+
+		String message = new String(plainText);
+
+		ctx.peerNetData.clear();
+		ctx.peerAppData.clear();
+		return message;
+	}
 	public static void main(String[] args) throws ClosedChannelException {
 		try {
 			parseArgs(args);
@@ -337,61 +362,18 @@ public class EventLoopServerSecure {
 				try {
 					System.out.println("Attempting to establish a connection with master at " + master_host + ":" + master_port);
 					SocketChannel masterChannel = SocketChannel.open();
+					SSLContext sslContext = SSLUtil.createSSLContext(keystorePassword, trustStorePassword);
+					SSLEngine sslEngine = sslContext.createSSLEngine(master_host, master_port);
+					
 					masterChannel.connect(new InetSocketAddress(master_host, master_port));
-					
-					String PingCommand = "*1\r\n$4\r\nPING\r\n";
-					masterChannel.write(ByteBuffer.wrap(PingCommand.getBytes()));
-					
-					// read PONG received from Master. If PONG received sends REPLCONF twice to the master
-					ByteBuffer masterBuffer = ByteBuffer.allocate(256);
-					// allocate 256 byte sized buffer
-					int BytesReadFromMaster = masterChannel.read(masterBuffer);
-					// read from masterChannel into the masterBuffer 
-					masterBuffer.flip();
-					String PingResponse = new String(masterBuffer.array(), 0, BytesReadFromMaster);
-					masterBuffer.clear();
-					System.out.println("Master Response to PING: " + PingResponse);
-					String[] PingParts = PingResponse.split("\r\n");
-					if (PingParts[0].equalsIgnoreCase("+PONG")) {
-						// if true then master responded correctly with PONG
-						System.out.println("Sending First ReplConf");
-						String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
-						masterChannel.write(ByteBuffer.wrap(firstReplConf.getBytes()));
-						
-						int BytesReadReplConf = masterChannel.read(masterBuffer);
-						masterBuffer.flip();
-						String FirstReplConfResponse = new String(masterBuffer.array(), 0, BytesReadReplConf);
-						masterBuffer.clear();
-						if (!FirstReplConfResponse.contains("OK")) {
-							System.out.println("Failed to receive OK response from Master for REPLCONF 1");
-						} else {
-							System.out.println("Received: " + FirstReplConfResponse + "in response to first REPLCONF command");
-							System.out.println("Sending second REPLCONF command");
-							String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
-							masterChannel.write(ByteBuffer.wrap(secondReplConf.getBytes()));
-							
-							int BytesReadSecondReplConf = masterChannel.read(masterBuffer);
-							masterBuffer.flip();
-							String SecondReplConfResponse = new String(masterBuffer.array(), 0, BytesReadSecondReplConf);
-							if (!SecondReplConfResponse.contains("OK")) {
-	                            System.out.println("Failed to receive OK response from Master for REPLCONF 2");
-	                        } else {
-	                            System.out.println("Master Server replied with OK to both REPLCONF commands");
-	                            masterBuffer.clear();
-	                                
-	                            System.out.println("Sending PSYNC to the master");
-	                            String PsyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
-	                            masterChannel.write(ByteBuffer.wrap(PsyncCommand.getBytes()));
-	                            masterBuffer.clear();
-	                            
-	                            System.out.println("Handshake complete - Registering Master Channel with Selector");
-	        					masterChannel.configureBlocking(false);
-	                            masterChannel.register(selector, SelectionKey.OP_READ, "master");
-	                            
-	                        }
-						}
-											
-	                }	
+					sslEngine.setUseClientMode(true);
+					sslEngine.beginHandshake();
+
+					ConnectionContext ctx = new ConnectionContext(masterChannel, sslEngine, "master");
+					ctx.handshaking = true;
+					masterChannel.configureBlocking(false);
+					masterChannel.register(selector, SelectionKey.OP_CONNECT, ctx);
+
 				} catch (IOException e) {
 					System.err.println("Error during master handshake: " + e.getMessage());
 				}
@@ -410,8 +392,7 @@ public class EventLoopServerSecure {
                     blockTime = waitRequest.timeOut - currentTime;
                     if (blockTime <= 0) {
                         System.out.println("Wait request time out reached");
-                        ByteBuffer waitResponseBuffer = ByteBuffer.wrap((":" + acknowledgedReplicas + "\r\n").getBytes());
-                        waitRequest.channel.write(waitResponseBuffer);
+                       	encryptAndSendResponse(waitRequest.ctx, ":" + acknowledgedReplicas + "\r\n");
 
                         waitRequest = null;
                         master_repl_offset += "*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n1\r\n*\r\n".getBytes().length;
@@ -440,13 +421,13 @@ public class EventLoopServerSecure {
                             System.out.println("The result of the blocked xread is: " + xreadResult.toString());
                             if (xreadResult.toString().equals("$-1\r\n")) {
                                 // no xadd occurred in streams waiting on so send bulk empty string 
-                                xreadblock.channel.write(ByteBuffer.wrap(xreadResult.toString().getBytes()));
+								encryptAndSendResponse(xreadblock.ctx, xreadResult.toString());
                             } else {
                                 // xadd did occur in streams waiting!
                                 System.out.println("xaddds occurred while channels blocked!");
                                 System.out.println(xreadResult);
                                 StringBuilder starter = new StringBuilder("*").append(xreadCommand.numNodesWithDataRead).append("\r\n");
-                                xreadblock.channel.write(ByteBuffer.wrap((starter.toString() + xreadResult.toString()).getBytes()));
+								encryptAndSendResponse(xreadblock.ctx, starter.toString() + xreadResult.toString());
                             }
                         }
                     }
@@ -490,6 +471,22 @@ public class EventLoopServerSecure {
 						} else {
 							continue;
 						}
+					} else if (currKey.isConnectable()) {
+						SocketChannel channel = (SocketChannel) currKey.channel();
+						ConnectionContext ctx = (ConnectionContext) currKey.attachment();
+
+						if (channel.finishConnect()) {
+							System.out.println("Finished TCP handshake with master: " + channel.getRemoteAddress());
+							ctx.handshaking = true;
+
+							channel.register(selector, SelectionKey.OP_READ, ctx);
+							// register the key and the next step if the TLS handshake followed by the
+							// master-replica handshake
+						} else {
+							System.err.println("TCP connect failed for master!");
+							currKey.cancel();
+						}
+					
 					} else if (currKey.isReadable()) {
 						// check if event on the channel is a READ event
 						SocketChannel channel = (SocketChannel) currKey.channel();
@@ -498,31 +495,65 @@ public class EventLoopServerSecure {
 						System.out.println("Reading from " + sourceType + " channel" + channel.getRemoteAddress());
 						
 						if (ctx.handshaking) {
+							// TLS Handshake
 							doHandshakeStep(ctx);
 							break;
 						}
-						// clears the byte buffer to prepare it for a new read operation
-						ctx.peerNetData.clear(); // read into the encrypted input buffer
-						int bytesRead = ctx.channel.read(ctx.peerNetData);
-						if (bytesRead == -1) {
-							System.out.println("Channel disconnected: " + ctx.channel.getRemoteAddress());
-							currKey.cancel(); // cancel the key and remove it from the Selector
-							ctx.channel.close();
-							continue; // continue to the next key
+						if (sourceType.equals("master") && !ctx.finishedMasterReplHandshake) {
+							// if the connection key is to a master and we have not finished the master handshake
+							// then we proceed with this before reading from the buffer as usual
+							String pingCommand = "*1\r\n$4\r\nPING\r\n";
+							encryptAndSendResponse(ctx, pingCommand);
+							
+							String pingResponse = readEncrypted(ctx);
+							if (pingResponse.equals("Master disconnect")) {
+								currKey.cancel();
+								ctx.channel.close();
+								continue;					
+							}
+							String[] pingParts = pingResponse.split("\r\n");
+							if (!pingParts[0].equalsIgnoreCase("+PONG")) {
+								System.err.println("Failed to receive appropriate response from PING during master-replica handshake");
+								currKey.cancel();
+								ctx.channel.close();
+								break;
+							}
+							System.out.println("Sending First REPLCONF after successful PING -> PONG");
+							String firstReplConf = "*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$4\r\n" + port + "\r\n";
+							encryptAndSendResponse(ctx, firstReplConf);
+							
+							String firstReplConfResponse = readEncrypted(ctx);
+							if (!firstReplConfResponse.contains("OK")) {
+								System.out.println("Failed to receive OK response from Master for REPLCONF 1");
+								currKey.cancel();
+								ctx.channel.close();
+								break;
+							}
+							System.out.println("Sending second REPLCONF command");
+							String secondReplConf = "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n";
+							encryptAndSendResponse(ctx, secondReplConf);
+
+							String secondReplConfResponse = readEncrypted(ctx);
+							if (!secondReplConfResponse.contains("OK")) {
+								System.out.println("Failed to receive OK response from Master for REPLCONF 2");
+								currKey.cancel();
+								ctx.channel.close();
+								break;
+							}
+							System.out.println("Master Server replied with OK to both REPLCONF commands");
+							System.out.println("Sending PSYNC to the master");
+							String psyncCommand = "*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n";
+							encryptAndSendResponse(ctx, psyncCommand);
+							System.out.println("Handshake complete");
+							ctx.finishedMasterReplHandshake = true;
 						}
-						ctx.peerNetData.flip();
-                        System.out.println(sourceType + " wrote " + bytesRead + " bytes");
-						// Unwrap the encrypted bytes into plain text
-						SSLEngineResult result = ctx.sslEngine.unwrap(ctx.peerNetData, ctx.peerAppData);
-						
-						ctx.peerNetData.compact();
-						ctx.peerAppData.flip(); // flip to read the plain text
-						
-						// creates a byte array 
-						byte[] plainText = new byte[ctx.peerAppData.remaining()];
-						ctx.peerAppData.get(plainText);
-						String message = new String(plainText);
-						// buffer.array is the byte array backing the :wantbuffer 0 and bytesRead are the starting and ending points of the read
+						String message = readEncrypted(ctx);
+						if (message.equals("Master disconnect")) {
+							System.out.println("Channel disconnected: " + ctx.channel.getRemoteAddress());
+							currKey.cancel();
+							channel.close();
+							continue;
+						}
 						String[] subcommands = message.split("(?=\\*[0-9])");
 						for (String subcommand : subcommands) {
 							if (subcommand.isEmpty()) {
@@ -534,7 +565,6 @@ public class EventLoopServerSecure {
 							
 							if (parts.length >= 2) {
 								String command = parts[2].toUpperCase();
-								ByteBuffer responseBuffer = null;
                                 if (!subcommand.contains("FULLRESYNC") && !subcommand.contains("GETACK")) {
 
                                     replConfOffset = replConfOffset + subcommand.getBytes().length;
@@ -553,7 +583,6 @@ public class EventLoopServerSecure {
 									case "ECHO":
 										System.out.println("Echo Argument: " + parts[4]);
                                         String echoResponse = parts[3] + "\r\n" + parts[4] + "\r\n"; 
-										responseBuffer = ByteBuffer.wrap(echoResponse.getBytes());
                                         if (!isreplica) {
 										    encryptAndSendResponse(ctx, echoResponse);
                                             master_repl_offset += echoResponse.getBytes().length;
@@ -834,7 +863,6 @@ public class EventLoopServerSecure {
                                             System.out.println("Xread response obtained (non-nil)");
                                             System.out.println("xreadResponse:");
                                             System.out.println(xreadContent);
-											
 											encryptAndSendResponse(ctx, xreadResponse.toString() + xreadContent.toString());
                                             break;
                                         } else {
@@ -877,7 +905,7 @@ public class EventLoopServerSecure {
                                         } 
                                         System.out.println("IncrResponse: ");
                                         System.out.println(incrResponse);
-                                        channel.write(ByteBuffer.wrap(incrResponse.toString().getBytes()));
+										encryptAndSendResponse(ctx, incrResponse.toString());
                                         break;
                                 
                                     case "MULTI":
@@ -888,7 +916,7 @@ public class EventLoopServerSecure {
                                         }
                                         Queue<RedisCommand> transactionQueue = new ArrayDeque<>();
                                         pendingTransactionQueues.put(channel, transactionQueue); 
-                                        channel.write(ByteBuffer.wrap("+OK\r\n".getBytes()));
+										encryptAndSendResponse(ctx, "+OK\r\n");
                                         break;
 
                                     case "EXEC":
@@ -896,13 +924,13 @@ public class EventLoopServerSecure {
                                         if (!pendingTransactionQueues.containsKey(channel)) {
                                             // EXEC command received but no transaction queue created
                                             System.out.println("EXEC command received without MULTI");
-                                            channel.write(ByteBuffer.wrap("-ERR EXEC without MULTI\r\n".getBytes()));
+											encryptAndSendResponse(ctx, "-ERR EXEC without MULTI\r\n");
                                             break;
                                         }
                                         if (pendingTransactionQueues.get(channel).size() == 0) {
                                             // EXEC command received, transaction queue created but no commands have been queued
                                             System.out.println("EXEC received with no queued commands");
-                                            channel.write(ByteBuffer.wrap("*0\r\n".getBytes()));
+											encryptAndSendResponse(ctx, "*0\r\n");
                                             pendingTransactionQueues.remove(channel);
                                             break;
                                         } else {
@@ -917,17 +945,17 @@ public class EventLoopServerSecure {
                                                 execQueueResponse.append(responseToCommand);
                                             }
                                             pendingTransactionQueues.remove(channel);
-                                            channel.write(ByteBuffer.wrap(execQueueResponse.toString().getBytes()));
+											encryptAndSendResponse(ctx, execQueueResponse.toString());
                                             break;
                                         }
                                     case "DISCARD":
                                         System.out.println("Discard command received");
                                         if (pendingTransactionQueues.containsKey(channel)) {
                                             pendingTransactionQueues.remove(channel);
-                                            channel.write(ByteBuffer.wrap("+OK\r\n".getBytes()));
+											encryptAndSendResponse(ctx, "+OK\r\n");
                                             break;
                                         }
-                                        channel.write(ByteBuffer.wrap("-ERR DISCARD without MULTI\r\n".getBytes()));
+										encryptAndSendResponse(ctx, "-ERR DISCARD without MULTI\r\n");
                                         break;
                                     case "BGSAVE":
                                         System.out.println("BGSAVE command received");

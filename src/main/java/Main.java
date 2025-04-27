@@ -13,7 +13,7 @@ public class Main {
           serverSocket.setReuseAddress(true);
           System.out.println("Server listening on port " + port);
 
-          while (true) { 
+          while (true) {
             // Accept a new client
             // blocking call waiting for new client connection but only affects the main thread
             Socket clientSocket = serverSocket.accept();
