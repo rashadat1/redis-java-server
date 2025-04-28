@@ -34,8 +34,4 @@ public class ConnectionContext {
         this.netData = ByteBuffer.allocate(session.getPacketBufferSize());
         this.appData = ByteBuffer.allocate(session.getApplicationBufferSize());
     }
-
-
-
-
 }

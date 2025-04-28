@@ -49,7 +49,7 @@ public class EventLoopServerSecure {
     private static ArrayList<SaveCommand> saveCommandSchedule = new ArrayList<>();
 	private static String keystorePassword;
 	private static String trustStorePassword;
-	private static SSLContext sslContext = SSLUtil.createSSLContext(keystorePassword, trustStorePassword);
+	private static SSLContext sslContext;
 	// if prod flag is true we require any connection be authenticated
 	private static ArrayList<SocketChannel> authenticatedSockets = new ArrayList<>();
 
@@ -260,11 +260,17 @@ public class EventLoopServerSecure {
 		SSLEngineResult.HandshakeStatus handshakeStatus = ctx.sslEngine.getHandshakeStatus();
 
 		while (true) {
+
+			//System.out.println("Starting server handshake iteration with status: " + handshakeStatus);
 			switch (handshakeStatus) {
 				case NEED_UNWRAP:
+					//System.out.println("Doing NEED UNWRAP");
 					int bytesRead = ctx.channel.read(ctx.peerNetData); // read bytes from channel into peerNetData buffer
 					if (bytesRead == -1) {
 						throw new IOException("Channel closed before handshake");
+					} else if (bytesRead == 0) {
+						// No new data available, wait for next OP_READ
+						return;
 					}
 					ctx.peerNetData.flip(); // flip for reading
 					result = ctx.sslEngine.unwrap(ctx.peerNetData, ctx.peerAppData);
@@ -273,7 +279,7 @@ public class EventLoopServerSecure {
 					break;
 
 				case NEED_WRAP:
-				case NEED_UNWRAP_AGAIN:
+					System.out.println("Doing NEED WRAP");
 					ctx.netData.clear();
 					result = ctx.sslEngine.wrap(ctx.appData, ctx.netData);
 					ctx.netData.flip();
@@ -283,7 +289,18 @@ public class EventLoopServerSecure {
 					handshakeStatus = result.getHandshakeStatus();
 					break;
 
+				case NEED_UNWRAP_AGAIN:
+					System.out.println("Doing NEED UNWRAP AGAIN");
+
+					ctx.peerNetData.flip();
+					result = ctx.sslEngine.unwrap(ctx.peerNetData, ctx.peerAppData);
+					ctx.peerNetData.compact();
+					handshakeStatus = result.getHandshakeStatus();
+					break;
+
 				case NEED_TASK:
+					System.out.println("Doing NEED TASK");
+
 					Runnable task;
 					while ((task = ctx.sslEngine.getDelegatedTask()) != null) {
 						task.run();
@@ -293,13 +310,19 @@ public class EventLoopServerSecure {
 
 				case FINISHED:
 				case NOT_HANDSHAKING:
+					System.out.println("Finished or not handshaking");
 					ctx.handshaking = false;
 					System.out.println("Handshake complete for connection: " + ctx.channel.getRemoteAddress());
 					return;
+
+				default:
+					throw new IllegalStateException("Unexpected Handshake Status: " + handshakeStatus);
 			}
 			if (handshakeStatus == SSLEngineResult.HandshakeStatus.NEED_UNWRAP && ctx.peerNetData.position() == 0) {
-				break;
+				System.out.println("Server: No new data to unwrap, wait for next read...");
+				return;
 			}
+
 		}
 	}
 	private static void encryptAndSendResponse(ConnectionContext ctx, String response) throws IOException {
@@ -320,7 +343,6 @@ public class EventLoopServerSecure {
 
 	private static String readEncrypted(ConnectionContext ctx) throws IOException {
 		ctx.peerAppData.clear();
-		ctx.peerNetData.clear();
 		
 		int bytesRead = ctx.channel.read(ctx.peerNetData);
 		if (bytesRead == -1) {
@@ -338,12 +360,15 @@ public class EventLoopServerSecure {
 		ctx.peerAppData.get(plainText);
 
 		String message = new String(plainText);
-
-		ctx.peerNetData.clear();
 		ctx.peerAppData.clear();
 		return message;
 	}
 	public static void main(String[] args) throws ClosedChannelException {
+		EnvLoader.loadEnv(".env");
+
+		keystorePassword = System.getProperty("KEYSTORE_PASSWORD");
+		trustStorePassword = System.getProperty("TRUSTSTORE_PASSWORD");
+		sslContext = SSLUtil.createSSLContext(keystorePassword, trustStorePassword);
 		try {
 			parseArgs(args);
 			// create Selector for channel monitoring  
@@ -460,13 +485,21 @@ public class EventLoopServerSecure {
 							// if not clientChannel is a reference to the connection with the client
 							clientChannel.configureBlocking(false);
 							SSLEngine sslEngine = sslContext.createSSLEngine();
+							sslEngine.setEnabledProtocols(new String[] {"TLSv1.3"});
+							sslEngine.setEnabledCipherSuites(new String[] {
+								"TLS_AES_128_GCM_SHA256",
+								"TLS_AES_256_GCM_SHA384",
+								"TLS_CHACHA20_POLY1305_SHA256"
+							});
+
 							sslEngine.setUseClientMode(false);
 							sslEngine.setNeedClientAuth(true);
 
 							sslEngine.beginHandshake();
 							ConnectionContext context = new ConnectionContext(clientChannel, sslEngine, "client");
+							doHandshakeStep(context);
 							// Register for read events
-							clientChannel.register(selector,  SelectionKey.OP_READ, context);
+							clientChannel.register(selector,  SelectionKey.OP_READ | SelectionKey.OP_WRITE, context);
 							System.out.println("New client connected: " + clientChannel.getRemoteAddress());
 						} else {
 							continue;
@@ -492,7 +525,8 @@ public class EventLoopServerSecure {
 						SocketChannel channel = (SocketChannel) currKey.channel();
 						ConnectionContext ctx = (ConnectionContext) currKey.attachment(); // retrieve metadata - master or client
 						String sourceType = ctx.entity;
-						System.out.println("Reading from " + sourceType + " channel" + channel.getRemoteAddress());
+						//System.out.println("Reading from " + sourceType + " channel" + channel.getRemoteAddress());
+						//System.out.println("Handshaking?: " + ctx.handshaking);
 						
 						if (ctx.handshaking) {
 							// TLS Handshake

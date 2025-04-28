@@ -10,14 +10,14 @@ public class SSLUtil {
         // load the keystore which stores the private key and public cert
         try {
             KeyStore keyStore = KeyStore.getInstance("PKCS12");
-            try (FileInputStream fis = new FileInputStream(System.getProperty("user.dir") + "/../../../certs/server/server-keystore.p12")) {
+            try (FileInputStream fis = new FileInputStream(System.getProperty("user.dir") + "/certs/server/server-keystore.p12")) {
                 keyStore.load(fis, keystorePassword.toCharArray());
             }
             KeyManagerFactory kmf = KeyManagerFactory.getInstance("SunX509");
             kmf.init(keyStore, keystorePassword.toCharArray());
             // Load Truststore (CA cert)
             KeyStore trustStore = KeyStore.getInstance("PKCS12");
-            try (FileInputStream fis = new FileInputStream(System.getProperty("user.dir") + "/../../../certs/ca/ca-truststore.p12")) {
+            try (FileInputStream fis = new FileInputStream(System.getProperty("user.dir") + "/certs/ca/ca-truststore.p12")) {
                 trustStore.load(fis, truststorePassword.toCharArray());
             }
             TrustManagerFactory tmf = TrustManagerFactory.getInstance("SunX509");
