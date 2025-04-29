@@ -13,6 +13,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Queue;
@@ -25,16 +26,18 @@ import java.util.stream.Collectors;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
+
+import org.mindrot.jbcrypt.BCrypt;
 public class EventLoopServerSecure {
 	
-	private static int port = 6379;
+    private static int port = 6379;
 	public static ConcurrentHashMap<String, String> data = new ConcurrentHashMap<>();
 	public static ConcurrentHashMap<String, Instant> expiryTimes = new ConcurrentHashMap<>();
 	private static String dir = null;
 	private static String dbfilename = null;
 	private static boolean isreplica = false;
 	public static String master_replid = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
-	public static int master_repl_offset = 0;
+    public static int master_repl_offset = 0;
 	private static String master_host = null;
 	private static int master_port = 0;
     final static String empty_rdb_contents = "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2";
@@ -51,8 +54,8 @@ public class EventLoopServerSecure {
 	private static String trustStorePassword;
 	private static SSLContext sslContext;
 	// if prod flag is true we require any connection be authenticated
-	private static ArrayList<SocketChannel> authenticatedSockets = new ArrayList<>();
-
+    private static HashSet<SocketChannel> authenticatedSockets = new HashSet<>();
+  
     private static int parsedREPLACK = 0;
     final static HashMap<String, Stream> streamMap = new HashMap<>();
 	private static void loadRDBFile() throws IOException {
@@ -580,15 +583,49 @@ public class EventLoopServerSecure {
 							encryptAndSendResponse(ctx, psyncCommand);
 							System.out.println("Handshake complete");
 							ctx.finishedMasterReplHandshake = true;
-						}
+						} 
 						String message = readEncrypted(ctx);
 						if (message.equals("Master disconnect")) {
 							System.out.println("Channel disconnected: " + ctx.channel.getRemoteAddress());
 							currKey.cancel();
 							channel.close();
 							continue;
-						}
+						} else if (message.length() == 0) {
+                            continue;
+                        }
+                        
 						String[] subcommands = message.split("(?=\\*[0-9])");
+
+                        if (!authenticatedSockets.contains(channel)) {
+                            // if channel is not yet authenticated -> so first Message should be an AUTH
+                            String firstMessage = subcommands[0];
+                            String[] firstMessageParts = firstMessage.split("\r\n");
+                            if (firstMessageParts.length == 7 && firstMessageParts[2].equalsIgnoreCase("AUTH")) {
+                                System.out.println("AUTH received");
+								String userName = System.getProperty("GATEWAY_CLIENT_USER");
+								String password = System.getProperty("GATEWAY_CLIENT_HASHED_PASS");
+
+								String userNameAttempt = firstMessageParts[4];
+								String passwordAttempt = firstMessageParts[6];
+
+								boolean compareResult = BCrypt.checkpw(passwordAttempt, password);
+								if (userNameAttempt.trim().equals(userName) && compareResult) {
+									authenticatedSockets.add(channel);
+									encryptAndSendResponse(ctx, "+OK\r\n");
+								} else {
+									// if username or password incorrect -> disconnect from client
+									System.out.println("Username/Password incorrect");
+									encryptAndSendResponse(ctx, "Username/Password incorrect: terminating connection");
+									currKey.cancel();
+									channel.close();
+								}
+                            } else {
+								System.out.println("Not authenticated");
+								encryptAndSendResponse(ctx, "Not authenticated");
+								currKey.cancel();
+								channel.close();
+							}
+                        } 
 						for (String subcommand : subcommands) {
 							if (subcommand.isEmpty()) {
 								continue;
