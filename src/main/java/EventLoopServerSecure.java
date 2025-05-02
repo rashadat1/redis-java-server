@@ -334,11 +334,15 @@ public class EventLoopServerSecure {
 
 		ctx.appData.put(response.getBytes());
 		ctx.appData.flip();
-		ctx.sslEngine.wrap(ctx.appData, ctx.netData);
 
-		ctx.netData.flip();
-		while (ctx.netData.hasRemaining()) {
-			ctx.channel.write(ctx.netData);
+		while (ctx.appData.hasRemaining()) {
+			ctx.netData.clear();
+			ctx.sslEngine.wrap(ctx.appData, ctx.netData);
+
+			ctx.netData.flip();
+			while (ctx.netData.hasRemaining()) {
+				ctx.channel.write(ctx.netData);
+			}
 		}
 		ctx.appData.clear();
 		ctx.netData.clear();
@@ -593,7 +597,6 @@ public class EventLoopServerSecure {
 						} else if (message.length() == 0) {
                             continue;
                         }
-                        
 						String[] subcommands = message.split("(?=\\*[0-9])");
 
                         if (!authenticatedSockets.contains(channel)) {
@@ -610,6 +613,7 @@ public class EventLoopServerSecure {
 
 								boolean compareResult = BCrypt.checkpw(passwordAttempt, password);
 								if (userNameAttempt.trim().equals(userName) && compareResult) {
+									System.out.println("User+Password correct");
 									authenticatedSockets.add(channel);
 									encryptAndSendResponse(ctx, "+OK\r\n");
 								} else {
